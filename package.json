@@ -1,0 +1,50 @@
+{
+  "name": "pebble-fmi-graph",
+  "author": "Tuukka Ruhanen",
+  "version": "1.0.0",
+  "keywords": [
+    "weather",
+    "fmi",
+    "finland",
+    "graph"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "FMI forecast",
+    "uuid": "f315c701-6b02-4cd9-9317-f01924d73106",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [
+      "REQUEST_DATA",
+      "STATUS",
+      "TEMPERATURES",
+      "PRECIPITATION",
+      "LOCAL_START_HOUR",
+      "LOCAL_START_WEEKDAY",
+      "CURRENT_INDEX",
+      "LOCATION_NAME",
+      "WIND_SPEED",
+      "WIND_DIRECTION",
+      "WIND_GUST",
+      "CLOUD_COVER",
+      "LOCAL_START_DAY",
+      "LOCAL_START_MONTH"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}

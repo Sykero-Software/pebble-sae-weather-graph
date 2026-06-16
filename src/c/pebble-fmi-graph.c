@@ -1,0 +1,801 @@
+#include <pebble.h>
+#include <limits.h>
+
+#define MAX_TEMPS         240
+#define TITLE_HEIGHT      20
+#define CLOUD_HEIGHT      7
+#define TLABEL_HEIGHT     14
+#define BOTTOM_PAD        -1
+
+/* ---------- state ---------- */
+
+typedef enum { STATUS_LOADING, STATUS_READY, STATUS_ERROR } AppStatus;
+
+static Window    *s_window;
+static Layer     *s_graph_layer;
+static TextLayer *s_status_layer;
+
+static AppStatus  s_status           = STATUS_LOADING;
+static int8_t     s_temps[MAX_TEMPS];
+static uint8_t    s_precip[MAX_TEMPS];
+static uint8_t    s_wind_speed[MAX_TEMPS];  /* whole m/s, 255=NaN */
+static uint8_t    s_wind_dir[MAX_TEMPS];    /* dir/360*254, 255=NaN */
+static uint8_t    s_wind_gust[MAX_TEMPS];   /* whole m/s, 255=NaN */
+static uint8_t    s_cloud[MAX_TEMPS];       /* 0-100%, 255=NaN */
+static int        s_temp_count       = 0;
+static int        s_precip_count     = 0;
+static int        s_wind_count       = 0;
+static int        s_wind_gust_count  = 0;
+static int        s_cloud_count      = 0;
+static int        s_current_idx      = 0;
+static int        s_local_start_h    = 0;
+static int        s_local_start_wday = 0;  /* JS getDay(): 0=Sun */
+static int        s_local_start_day  = 1;  /* day of month */
+static int        s_local_start_mon  = 1;  /* month 1-12 */
+static char       s_location[33]     = "";
+static int        s_zoom_days        = 1;  /* 1 or 5 */
+static int        s_scroll_offset    = 0;  /* hours scrolled forward */
+
+static GPath     *s_wind_arrow       = NULL;
+
+#define MAX_DAYS 12
+static int s_day_count = 0;
+static int s_day_min_val[MAX_DAYS];
+static int s_day_max_val[MAX_DAYS];
+static int s_day_min_abs[MAX_DAYS];  /* absolute index into s_temps */
+static int s_day_max_abs[MAX_DAYS];
+static int s_day_abs_start[MAX_DAYS];
+static int s_day_abs_end[MAX_DAYS];
+
+/* ---------- helpers ---------- */
+
+/* Compute per-calendar-day min/max from fixed midnight-aligned grid. Called once after data loads. */
+static void prv_compute_daily_stats(void) {
+  s_day_count = 0;
+  if (s_temp_count < 2) return;
+  int first_midnight = (24 - s_local_start_h) % 24;
+  int seg_start = 0;
+  int seg_len = (first_midnight == 0) ? 24 : first_midnight;
+  while (seg_start < s_temp_count && s_day_count < MAX_DAYS) {
+    int seg_end = seg_start + seg_len - 1;
+    if (seg_end >= s_temp_count) seg_end = s_temp_count - 1;
+    if (seg_end > seg_start) {  /* need at least 2 hours */
+      /* Min: scan forward from day start */
+      int min_val = (int)s_temps[seg_start], min_abs = seg_start;
+      for (int i = seg_start + 1; i <= seg_end; i++) {
+        int t = (int)s_temps[i];
+        if (t < min_val) { min_val = t; min_abs = i; }
+      }
+      /* Max: scan backward from day end, only after min_abs */
+      int max_val = INT_MIN, max_abs = -1;
+      for (int i = seg_end; i > min_abs; i--) {
+        int t = (int)s_temps[i];
+        if (t > max_val) { max_val = t; max_abs = i; }
+      }
+      /* If no point exists after the minimum, suppress both labels */
+      if (max_abs < 0) { min_abs = -1; }
+      s_day_min_val[s_day_count] = min_val;
+      s_day_max_val[s_day_count] = max_val;
+      s_day_min_abs[s_day_count] = min_abs;
+      s_day_max_abs[s_day_count] = max_abs;
+      s_day_abs_start[s_day_count] = seg_start;
+      s_day_abs_end[s_day_count] = seg_end;
+      s_day_count++;
+    }
+    seg_start = seg_end + 1;
+    seg_len = 24;
+  }
+}
+
+static void prv_request_data(void) {
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) != APP_MSG_OK) return;
+  dict_write_int8(iter, MESSAGE_KEY_REQUEST_DATA, 1);
+  app_message_outbox_send();
+}
+
+static void prv_update_status_layer(void) {
+  bool show = (s_status != STATUS_READY);
+  layer_set_hidden(text_layer_get_layer(s_status_layer), !show);
+  if (s_status == STATUS_ERROR) {
+    text_layer_set_text(s_status_layer, "Could not load\nforecast.");
+  } else {
+    text_layer_set_text(s_status_layer, "Loading\nforecast...");
+  }
+}
+
+/* ---------- AppMessage ---------- */
+
+static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
+  Tuple *status_t = dict_find(iter, MESSAGE_KEY_STATUS);
+  if (!status_t) return;
+
+  s_status = (AppStatus)status_t->value->int32;
+
+  if (s_status == STATUS_READY) {
+    Tuple *temps_t  = dict_find(iter, MESSAGE_KEY_TEMPERATURES);
+    Tuple *precip_t = dict_find(iter, MESSAGE_KEY_PRECIPITATION);
+    Tuple *wspd_t   = dict_find(iter, MESSAGE_KEY_WIND_SPEED);
+    Tuple *wdir_t   = dict_find(iter, MESSAGE_KEY_WIND_DIRECTION);
+    Tuple *idx_t    = dict_find(iter, MESSAGE_KEY_CURRENT_INDEX);
+    Tuple *sh_t     = dict_find(iter, MESSAGE_KEY_LOCAL_START_HOUR);
+    Tuple *wd_t     = dict_find(iter, MESSAGE_KEY_LOCAL_START_WEEKDAY);
+    Tuple *loc_t    = dict_find(iter, MESSAGE_KEY_LOCATION_NAME);
+
+    if (temps_t && temps_t->type == TUPLE_BYTE_ARRAY) {
+      int n = (int)temps_t->length < MAX_TEMPS ? (int)temps_t->length : MAX_TEMPS;
+      s_temp_count = n;
+      const uint8_t *raw = (const uint8_t *)temps_t->value->data;
+      for (int i = 0; i < n; i++) s_temps[i] = (int8_t)raw[i];
+    }
+    if (precip_t && precip_t->type == TUPLE_BYTE_ARRAY) {
+      int n = (int)precip_t->length < MAX_TEMPS ? (int)precip_t->length : MAX_TEMPS;
+      s_precip_count = n;
+      const uint8_t *raw = (const uint8_t *)precip_t->value->data;
+      for (int i = 0; i < n; i++) s_precip[i] = raw[i];
+    }
+    if (wspd_t && wspd_t->type == TUPLE_BYTE_ARRAY) {
+      int n = (int)wspd_t->length < MAX_TEMPS ? (int)wspd_t->length : MAX_TEMPS;
+      s_wind_count = n;
+      const uint8_t *raw = (const uint8_t *)wspd_t->value->data;
+      for (int i = 0; i < n; i++) s_wind_speed[i] = raw[i];
+    }
+    if (wdir_t && wdir_t->type == TUPLE_BYTE_ARRAY) {
+      int n = (int)wdir_t->length < MAX_TEMPS ? (int)wdir_t->length : MAX_TEMPS;
+      if (n > s_wind_count) s_wind_count = n;
+      const uint8_t *raw = (const uint8_t *)wdir_t->value->data;
+      for (int i = 0; i < n; i++) s_wind_dir[i] = raw[i];
+    }
+    Tuple *cloud_t = dict_find(iter, MESSAGE_KEY_CLOUD_COVER);
+    if (cloud_t && cloud_t->type == TUPLE_BYTE_ARRAY) {
+      int n = (int)cloud_t->length < MAX_TEMPS ? (int)cloud_t->length : MAX_TEMPS;
+      s_cloud_count = n;
+      const uint8_t *raw = (const uint8_t *)cloud_t->value->data;
+      for (int i = 0; i < n; i++) s_cloud[i] = raw[i];
+    }
+    Tuple *wgust_t = dict_find(iter, MESSAGE_KEY_WIND_GUST);
+    if (wgust_t && wgust_t->type == TUPLE_BYTE_ARRAY) {
+      int n = (int)wgust_t->length < MAX_TEMPS ? (int)wgust_t->length : MAX_TEMPS;
+      s_wind_gust_count = n;
+      const uint8_t *raw = (const uint8_t *)wgust_t->value->data;
+      for (int i = 0; i < n; i++) s_wind_gust[i] = raw[i];
+    }
+    if (idx_t) s_current_idx      = (int)idx_t->value->int32;
+    if (sh_t)  s_local_start_h    = (int)sh_t->value->int32;
+    if (wd_t)  s_local_start_wday = (int)wd_t->value->int32;
+    Tuple *day_t = dict_find(iter, MESSAGE_KEY_LOCAL_START_DAY);
+    Tuple *mon_t = dict_find(iter, MESSAGE_KEY_LOCAL_START_MONTH);
+    if (day_t) s_local_start_day = (int)day_t->value->int32;
+    if (mon_t) s_local_start_mon = (int)mon_t->value->int32;
+    if (loc_t) snprintf(s_location, sizeof(s_location), "%s", loc_t->value->cstring);
+    s_scroll_offset = 0;
+    prv_compute_daily_stats();
+  }
+
+  prv_update_status_layer();
+  layer_mark_dirty(s_graph_layer);
+}
+
+static void prv_inbox_dropped(AppMessageResult reason, void *ctx) {
+  APP_LOG(APP_LOG_LEVEL_ERROR, "Inbox dropped: %d", (int)reason);
+}
+
+/* ---------- graph layer ---------- */
+
+static void prv_graph_update(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  const int w  = bounds.size.w;
+  const int h  = bounds.size.h;
+  const int gt = TITLE_HEIGHT + CLOUD_HEIGHT;
+  const int gb = h - TLABEL_HEIGHT - BOTTOM_PAD;
+  const int gh = gb - gt;
+  const int precip_top = gt + 3;  /* small gap below cloud strip; also top of vertical grid lines */
+
+  GFont f_small  = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+  GFont f_medium = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+  GFont f_bold   = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+  GFont f_tiny   = fonts_get_system_font(FONT_KEY_GOTHIC_09);
+
+  /* White background */
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+  /* Separator line under title bar */
+  graphics_context_set_stroke_color(ctx, GColorLightGray);
+  graphics_context_set_stroke_width(ctx, 1);
+  graphics_draw_line(ctx, GPoint(0, TITLE_HEIGHT - 1), GPoint(w, TITLE_HEIGHT - 1));
+
+  if (s_status != STATUS_READY || s_temp_count < 2) return;
+
+  /* ---- zoom window ---- */
+  const int view_count = (s_zoom_days == 1) ? 24 : (s_zoom_days * 24);
+  const int view_start = s_scroll_offset;
+  const int n = (view_start + view_count <= s_temp_count)
+                ? view_count : (s_temp_count - view_start);
+  if (n < 2) return;
+
+#define X(i)  ((i) * w / n)
+#define Y(t)  (gb - ((t) - dmin) * gh / rng)
+#define YC(t) ({ int _y = Y(t); _y < gt ? gt : (_y > gb ? gb : _y); })
+
+  /* ---- cloud cover strip (between title bar and graph) ---- */
+  if (s_cloud_count > 0) {
+    const int cloud_gap = 2;                          /* px gap below title bar separator */
+    const int cloud_max_h = CLOUD_HEIGHT - cloud_gap; /* 5px usable, always odd */
+    const int strip_mid = TITLE_HEIGHT + cloud_gap + cloud_max_h / 2;
+    graphics_context_set_fill_color(ctx, GColorLightGray);
+    for (int i = 0; i < n; i++) {
+      int abs_i = view_start + i;
+      if (abs_i >= s_cloud_count) break;
+      uint8_t cv = s_cloud[abs_i];
+      if (cv == 255) continue;  /* NaN */
+      int band_h = (int)cv * cloud_max_h / 100;
+      if (band_h > 0 && (band_h % 2 == 0)) band_h--;  /* round down to odd */
+      if (band_h < 1) continue;
+      int x0 = X(i);
+      int x1 = X(i + 1);
+      int bw = x1 - x0;
+      if (bw < 1) bw = 1;
+      int y_top = strip_mid - band_h / 2;
+      graphics_fill_rect(ctx, GRect(x0, y_top, bw, band_h), 0, GCornerNone);
+    }
+  }
+
+  /* ---- temperature range over ALL data (equal scale across zoom levels) ---- */
+  int min_t = (int)s_temps[0], max_t = (int)s_temps[0];
+  for (int i = 1; i < s_temp_count; i++) {
+    int t = (int)s_temps[i];
+    if (t < min_t) min_t = t;
+    if (t > max_t) max_t = t;
+  }
+  int dmax = max_t + 3;
+  /* Compute bottom padding so Y(min_t) >= TLABEL_HEIGHT+5 px above gb,
+     ensuring min-temp labels clear the weekday row in zoomed-in view.
+     Constraint: bot_pad * (gh - pad_px) >= pad_px * (dmax - min_t) */
+  int pad_px = 2 * TLABEL_HEIGHT + 5;
+  int bot_pad = 2;
+  if (gh > pad_px) {
+    int needed = (pad_px * (dmax - min_t) + gh - pad_px - 1) / (gh - pad_px);
+    if (needed > bot_pad) bot_pad = needed;
+  }
+  int dmin = min_t - bot_pad;
+  int rng  = dmax - dmin;
+  if (rng < 1) rng = 1;
+
+  /* ---- grid lines (every 5 °C) ---- */
+  {
+    int g0 = (dmin / 5) * 5 - (dmin < 0 && dmin % 5 ? 5 : 0);
+    for (int t = g0; t <= dmax; t += 5) {
+      int y = Y(t);
+      if (y <= gt || y >= gb) continue;
+      graphics_context_set_stroke_color(ctx, GColorLightGray);
+      graphics_context_set_stroke_width(ctx, 1);
+      graphics_draw_line(ctx, GPoint(0, y), GPoint(w, y));
+    }
+  }
+
+  /* ---- x-axis tick lines ---- */
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, GRect(0, gb, w, h - gb), 0, GCornerNone);
+  graphics_context_set_stroke_color(ctx, GColorLightGray);
+  graphics_context_set_stroke_width(ctx, 1);
+
+  if (s_zoom_days == 1) {
+    int view_start_h = (s_local_start_h + view_start) % 24;
+    static const int target_hours[] = {0, 3, 6, 9, 12, 15, 18, 21};
+    for (int j = 0; j < 8; j++) {
+      int th  = target_hours[j];
+      int idx = (th - view_start_h + 24) % 24;
+      if (idx >= n) continue;
+      int tx = X(idx);
+      graphics_draw_line(ctx, GPoint(tx, precip_top), GPoint(tx, h));
+    }
+  } else {
+    int first_midnight_abs = (24 - s_local_start_h) % 24;
+    for (int k = 0; ; k++) {
+      int abs_idx = first_midnight_abs + k * 24;
+      int rel_idx = abs_idx - view_start;
+      if (rel_idx < 0) continue;
+      if (rel_idx >= n) break;
+      int tx = X(rel_idx);
+      graphics_draw_line(ctx, GPoint(tx, precip_top), GPoint(tx, h));
+    }
+  }
+
+  /* ---- precipitation scale (based on max 3h sum, consistent across zoom levels) ---- */
+  /* Each scale (precip top, wind bottom) uses slightly less than half gh.
+     tiny_lbl_h reserves space for the "mm" / "m/s" unit labels within that half. */
+  const int scale_half  = gh * 9 / 20;
+  const int tiny_lbl_h  = 12;
+  const int wind_top_y  = gb - scale_half + tiny_lbl_h;
+
+  int precip_max_p = 20;
+  int precip_max_bar_h = scale_half - tiny_lbl_h;
+  if (s_precip_count > 0) {
+    for (int i = 0; i < s_precip_count; i++) {
+      int p = (int)s_precip[i];
+      if (p > precip_max_p) precip_max_p = p;
+    }
+  }
+
+  /* ---- precipitation mm axis ticks (lines only, labels drawn later on top) ---- */
+  if (s_precip_count > 0) {
+    int tick_step = 5;
+    if (precip_max_p > 100) tick_step = 30;      /* >10mm: 3mm steps */
+    else if (precip_max_p > 50) tick_step = 20;  /* >5mm:  2mm steps */
+    else if (precip_max_p > 20) tick_step = 10;  /* >2mm:  1mm steps */
+    graphics_context_set_stroke_color(ctx, GColorLightGray);
+    graphics_context_set_stroke_width(ctx, 1);
+    graphics_draw_line(ctx, GPoint(w - 10, precip_top), GPoint(w, precip_top));
+    for (int p = tick_step; p <= precip_max_p; p += tick_step) {
+      int by = precip_top + p * precip_max_bar_h / precip_max_p;
+      if (by < precip_top || by > precip_top + precip_max_bar_h) continue;
+      graphics_context_set_stroke_color(ctx, GColorLightGray);
+      graphics_context_set_stroke_width(ctx, 1);
+      graphics_draw_line(ctx, GPoint(w - 10, by), GPoint(w, by));
+    }
+  }
+
+  /* ---- precipitation bars (hanging from precip_top, growing downward) ---- */
+  if (s_precip_count > 0) {
+    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorVividCerulean, GColorDarkGray));
+    if (s_zoom_days == 1) {
+      for (int i = 0; i < n; i++) {
+        int p = (int)s_precip[view_start + i];
+        if (p == 0) continue;
+        int bh = p * precip_max_bar_h / precip_max_p;
+        if (bh < 1) bh = 1;
+        int bx = X(i);
+        int bw = X(i + 1) - bx;
+        if (bw < 1) bw = 1;
+        graphics_fill_rect(ctx, GRect(bx, precip_top, bw, bh), 0, GCornerNone);
+      }
+    } else {
+      for (int i = 0; i < n; i++) {
+        int p = (int)s_precip[view_start + i];
+        if (p == 0) continue;
+        int bh = p * precip_max_bar_h / precip_max_p;
+        if (bh < 1) bh = 1;
+        int bx = X(i);
+        int bw = X(i + 1) - bx;
+        if (bw < 1) bw = 1;
+        graphics_fill_rect(ctx, GRect(bx, precip_top, bw, bh), 0, GCornerNone);
+      }
+    }
+  }
+
+  /* ---- wind speed/gust bars + direction arrows ---- */
+  int wind_max_spd = 5;       /* hoisted: also needed for label drawing after temp curve */
+  int wind_scale_top_y = -1;  /* hoisted: needed for "m/s" label position */
+  if (s_wind_count > 0 && s_wind_gust_count > 0) {
+    for (int i = 0; i < s_wind_count; i++) {
+      if (s_wind_speed[i] != 255 && (int)s_wind_speed[i] > wind_max_spd)
+        wind_max_spd = s_wind_speed[i];
+    }
+    for (int i = 0; i < s_wind_gust_count; i++) {
+      if (s_wind_gust[i] != 255 && (int)s_wind_gust[i] > wind_max_spd)
+        wind_max_spd = s_wind_gust[i];
+    }
+    wind_max_spd = ((wind_max_spd + 4) / 5) * 5;
+    const int wind_top = wind_top_y;
+    const int wind_bot = gb - TLABEL_HEIGHT - 3;
+    const int wind_h   = wind_bot - wind_top;
+#define WY(s) (wind_bot - (s) * wind_h / wind_max_spd)
+
+    /* Wind bars (light gray, speed→gust range) */
+    graphics_context_set_fill_color(ctx, GColorLightGray);
+    for (int i = 0; i < n; i++) {
+      int abs_i = view_start + i;
+      if (abs_i >= s_wind_count || abs_i >= s_wind_gust_count) continue;
+      uint8_t spd  = s_wind_speed[abs_i];
+      uint8_t gust = s_wind_gust[abs_i];
+      if (spd == 255 || gust == 255) continue;
+      if (gust < spd) gust = spd;  /* gust should be >= speed */
+      int y_spd  = WY(spd);
+      int y_gust = WY(gust);
+      if (y_gust < wind_top) y_gust = wind_top;
+      if (y_spd  > wind_bot) y_spd  = wind_bot;
+      int bar_h = y_spd - y_gust;
+      if (bar_h < 1) bar_h = 1;
+      int bx = X(i);
+      int bw = X(i + 1) - bx;
+      if (bw < 1) bw = 1;
+      graphics_fill_rect(ctx, GRect(bx, y_gust, bw, bar_h), 0, GCornerNone);
+    }
+
+    /* Direction arrows (zoomed-in only) */
+    if (s_zoom_days == 1 && s_wind_arrow) {
+      graphics_context_set_fill_color(ctx, GColorDarkGray);
+      graphics_context_set_stroke_color(ctx, GColorDarkGray);
+      graphics_context_set_stroke_width(ctx, 1);
+      for (int i = 0; i < n; i++) {
+        int abs_i = view_start + i;
+        if (abs_i >= s_wind_count || abs_i >= s_wind_gust_count) continue;
+        uint8_t spd  = s_wind_speed[abs_i];
+        uint8_t gust = s_wind_gust[abs_i];
+        uint8_t dir  = s_wind_dir[abs_i];
+        if (spd == 255 || gust == 255 || dir == 255) continue;
+        if (gust < spd) gust = spd;
+        int y_spd  = WY(spd);
+        int y_gust = WY(gust);
+        int cx = X(i) + (X(i + 1) - X(i)) / 2;
+        int cy = (y_gust + y_spd) / 2;
+        /* Decode direction: from_deg → to_deg (where wind goes) */
+        int32_t from_deg = (int32_t)dir * 360 / 254;
+        int32_t to_deg   = (from_deg + 180) % 360;
+        gpath_rotate_to(s_wind_arrow, (int32_t)(TRIG_MAX_ANGLE) * to_deg / 360);
+        gpath_move_to(s_wind_arrow, GPoint(cx, cy));
+        graphics_context_set_fill_color(ctx, GColorDarkGray);
+        gpath_draw_filled(ctx, s_wind_arrow);
+        graphics_context_set_stroke_color(ctx, GColorDarkGray);
+        gpath_draw_outline(ctx, s_wind_arrow);
+      }
+    }
+
+    /* Wind scale ticks on right (drawn on top of bars) */
+    graphics_context_set_stroke_color(ctx, GColorLightGray);
+    graphics_context_set_stroke_width(ctx, 1);
+    wind_scale_top_y = -1;
+    for (int s = 5; s <= wind_max_spd; s += 5) {
+      int sy = WY(s);
+      if (sy < wind_top || sy > wind_bot) continue;
+      graphics_draw_line(ctx, GPoint(w - 10, sy), GPoint(w, sy));
+      if (wind_scale_top_y < 0 || sy < wind_scale_top_y) wind_scale_top_y = sy;
+    }
+    /* 0 m/s tick at wind_bot */
+    graphics_draw_line(ctx, GPoint(w - 10, wind_bot), GPoint(w, wind_bot));
+
+#undef WY
+  }
+
+  /* ---- temperature curve (no fill) ---- */
+  graphics_context_set_stroke_color(ctx,
+    PBL_IF_COLOR_ELSE(GColorDarkCandyAppleRed, GColorBlack));
+  graphics_context_set_stroke_width(ctx, 2);
+  for (int i = 0; i < n - 1; i++) {
+    graphics_draw_line(ctx,
+      GPoint(X(i),     YC((int)s_temps[view_start + i])),
+      GPoint(X(i + 1), YC((int)s_temps[view_start + i + 1])));
+  }
+
+  /* ---- "now" dashed vertical marker ---- */
+  int now_i = s_current_idx - view_start;
+  if (now_i >= 0 && now_i < n) {
+    int nx = X(now_i);
+    graphics_context_set_stroke_color(ctx, GColorLightGray);
+    graphics_context_set_stroke_width(ctx, 1);
+    for (int y = gt; y < gb; y += 5) {
+      graphics_draw_line(ctx, GPoint(nx, y), GPoint(nx, y + 3 < gb ? y + 3 : gb));
+    }
+  }
+
+  /* ---- wind scale labels (drawn after temp curve so they appear on top) ---- */
+  if (s_wind_count > 0 && s_wind_gust_count > 0) {
+    const int wbot = gb - TLABEL_HEIGHT - 3;
+    const int wh   = wbot - wind_top_y;
+    for (int s = 5; s <= wind_max_spd; s += 5) {
+      int sy = wbot - s * wh / wind_max_spd;
+      if (sy < wind_top_y || sy > wbot) continue;
+      char lbl[4]; snprintf(lbl, sizeof(lbl), "%d", s);
+      graphics_context_set_text_color(ctx, GColorBlack);
+      graphics_draw_text(ctx, lbl, f_medium,
+                         GRect(w - 32, sy - 16, 28, 18),
+                         GTextOverflowModeWordWrap, GTextAlignmentRight, NULL);
+    }
+    graphics_context_set_text_color(ctx, GColorBlack);
+    graphics_draw_text(ctx, "0", f_medium,
+                       GRect(w - 32, wbot - 16, 28, 18),
+                       GTextOverflowModeWordWrap, GTextAlignmentRight, NULL);
+    if (wind_scale_top_y >= 0) {
+      graphics_draw_text(ctx, "m/s", f_tiny,
+                         GRect(w - 29, wind_scale_top_y - 25, 28, 12),
+                         GTextOverflowModeWordWrap, GTextAlignmentRight, NULL);
+    }
+  }
+
+  /* ---- temperature y-axis labels (drawn on top) ---- */
+  {
+    int g0 = (dmin / 5) * 5 - (dmin < 0 && dmin % 5 ? 5 : 0);
+    for (int t = g0; t <= dmax; t += 5) {
+      int y = Y(t);
+      if (y <= gt || y >= gb) continue;
+      char lbl[10]; snprintf(lbl, sizeof(lbl), "%d\xc2\xb0", t);
+      graphics_context_set_text_color(ctx, GColorBlack);
+      graphics_draw_text(ctx, lbl, f_medium,
+                         GRect(2, y - 16, 30, 18),
+                         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+    }
+  }
+
+  /* ---- precipitation mm labels (drawn on top) ---- */
+  int mm_bot_by = -1;  /* y of lowest mm tick — used by min/max label overlap check */
+  if (s_precip_count > 0) {
+    int tick_step = 5;
+    if (precip_max_p > 100) tick_step = 30;
+    else if (precip_max_p > 50) tick_step = 20;
+    else if (precip_max_p > 20) tick_step = 10;
+    int mm_top_by = -1;  /* y of topmost (smallest y) tick */
+    for (int p = tick_step; p <= precip_max_p; p += tick_step) {
+      int by = precip_top + p * precip_max_bar_h / precip_max_p;
+      if (by < precip_top || by > precip_top + precip_max_bar_h) continue;
+      if (mm_bot_by < 0 || by > mm_bot_by) mm_bot_by = by;
+      if (mm_top_by < 0 || by < mm_top_by) mm_top_by = by;
+      char lbl[6];
+      if (p % 10 == 0) snprintf(lbl, sizeof(lbl), "%d", p / 10);
+      else snprintf(lbl, sizeof(lbl), ".%d", p % 10);
+      graphics_context_set_text_color(ctx, GColorBlack);
+      graphics_draw_text(ctx, lbl, f_medium,
+                         GRect(w - 32, by - 16, 28, 18),
+                         GTextOverflowModeWordWrap, GTextAlignmentRight, NULL);
+    }
+    if (mm_bot_by >= 0) {
+      graphics_context_set_text_color(ctx, GColorBlack);
+      graphics_draw_text(ctx, "mm", f_tiny,
+                         GRect(w - 29, mm_bot_by, 28, 12),
+                         GTextOverflowModeWordWrap, GTextAlignmentRight, NULL);
+    }
+  }
+
+  /* ---- x-axis labels (drawn on top) ---- */
+  graphics_context_set_text_color(ctx, GColorBlack);
+  if (s_zoom_days == 1) {
+    static const int target_hours[] = {0, 3, 6, 9, 12, 15, 18, 21};
+    static const char *day_names[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    int view_start_h = (s_local_start_h + view_start) % 24;
+    for (int j = 0; j < 8; j++) {
+      int th  = target_hours[j];
+      int idx = (th - view_start_h + 24) % 24;
+      if (idx >= n) continue;
+      int tx = X(idx);
+      char lbl[4]; snprintf(lbl, sizeof(lbl), "%02d", th);
+      graphics_draw_text(ctx, lbl, f_small,
+                         GRect(tx + 4, gb - 3, 30, TLABEL_HEIGHT - 1),
+                         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+      if (th == 0) {
+        int abs_idx = view_start + idx;
+        int day_num = (s_local_start_h + abs_idx) / 24;
+        int weekday = (s_local_start_wday + day_num) % 7;
+        /* Compute actual date: add day_num days to start date */
+        static const int days_in_month[] = {0,31,28,31,30,31,30,31,31,30,31,30,31};
+        int dd = s_local_start_day + day_num;
+        int mm = s_local_start_mon;
+        while (dd > days_in_month[mm]) { dd -= days_in_month[mm]; mm++; if (mm > 12) mm = 1; }
+        char day_lbl[16];
+        snprintf(day_lbl, sizeof(day_lbl), "%s %d.%d.", day_names[weekday], dd, mm);
+        graphics_context_set_text_color(ctx, GColorBlack);
+        graphics_draw_text(ctx, day_lbl, f_small,
+                           GRect(tx + 4, gb - 3 - TLABEL_HEIGHT, 70, TLABEL_HEIGHT),
+                           GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+        graphics_context_set_text_color(ctx, GColorBlack);
+      }
+    }
+  } else {
+    static const char *day_names[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    int first_midnight_abs = (24 - s_local_start_h) % 24;
+    for (int k = -1; ; k++) {
+      int abs_idx = first_midnight_abs + k * 24;
+      int rel_idx = abs_idx - view_start;
+      if (rel_idx >= n) break;
+      if (rel_idx < -24) continue;  /* whole day off-screen */
+      int tx = X(rel_idx);
+      int weekday = (s_local_start_wday + (s_local_start_h + abs_idx) / 24) % 7;
+      /* Compute date */
+      static const int dim[] = {0,31,28,31,30,31,30,31,31,30,31,30,31};
+      int day_num = (s_local_start_h + abs_idx) / 24;
+      int dd = s_local_start_day + day_num;
+      int mm = s_local_start_mon;
+      while (dd > dim[mm]) { dd -= dim[mm]; mm++; if (mm > 12) mm = 1; }
+      char date_lbl[8]; snprintf(date_lbl, sizeof(date_lbl), "%d.%d.", dd, mm);
+      /* Weekday on top row, date on bottom row */
+      graphics_draw_text(ctx, day_names[weekday], f_small,
+                         GRect(tx + 4, gb - 3 - TLABEL_HEIGHT, 40, TLABEL_HEIGHT - 1),
+                         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+      graphics_draw_text(ctx, date_lbl, f_small,
+                         GRect(tx + 4, gb - 3, 40, TLABEL_HEIGHT - 1),
+                         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+    }
+  }
+
+  /* ---- daily min/max temperature labels (fixed calendar-day grid, precomputed) ---- */
+  {
+    graphics_context_set_text_color(ctx, GColorBlack);
+    const int lbl_w = 28;
+    /* Track all drawn label rects to avoid duplicates */
+#define MAX_DRAWN_LBLS 20
+    int drawn_lx[MAX_DRAWN_LBLS], drawn_ly[MAX_DRAWN_LBLS];
+    int drawn_n = 0;
+    for (int d = 0; d < s_day_count; d++) {
+      if (s_day_abs_end[d] < view_start || s_day_abs_start[d] >= view_start + n) continue;
+      if (s_zoom_days > 1) {
+        /* Skip days entirely outside the visible window */
+        if (s_day_abs_end[d] < view_start || s_day_abs_start[d] >= view_start + n) continue;
+      }
+      /* Day x bounds (clamped to view) */
+      int day_rel_s = (s_day_abs_start[d] > view_start ? s_day_abs_start[d] : view_start) - view_start;
+      int day_rel_e = (s_day_abs_end[d] < view_start + n - 1 ? s_day_abs_end[d] : view_start + n - 1) - view_start;
+      int day_x0 = X(day_rel_s);
+      int day_x1 = X(day_rel_e + 1);  /* right edge of last hour */
+      /* Max label */
+      {
+        int abs_i = s_day_max_abs[d];
+        if (abs_i < 0 || abs_i < view_start || abs_i >= view_start + n) goto skip_max;
+        int lbl_y = YC(s_day_max_val[d]) - 17;
+        int lx = X(abs_i - view_start) - lbl_w / 2;
+        if (lx < day_x0) lx = day_x0;
+        if (lx + lbl_w > day_x1) lx = day_x1 - lbl_w;
+        /* Skip if horizontally overlapping left (°C) or right (mm/m/s) scale areas */
+        if (lx < 18 || lx + lbl_w > w - 18) goto skip_max;
+        /* Skip if overlapping with any previously drawn label */
+        { bool overlap = false;
+          for (int i = 0; i < drawn_n; i++) {
+            if (lx < drawn_lx[i] + lbl_w && lx + lbl_w > drawn_lx[i] &&
+                lbl_y < drawn_ly[i] + 30 && lbl_y + 30 > drawn_ly[i]) { overlap = true; break; }
+          }
+          if (overlap) goto skip_max; }
+        char lbl[8]; snprintf(lbl, sizeof(lbl), "%d\xc2\xb0", s_day_max_val[d]);
+        graphics_draw_text(ctx, lbl, f_small, GRect(lx, lbl_y, lbl_w, 14),
+                           GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+        if (drawn_n < MAX_DRAWN_LBLS) { drawn_lx[drawn_n] = lx; drawn_ly[drawn_n] = lbl_y; drawn_n++; }
+      }
+      skip_max:;
+      /* Min label */
+      {
+        int abs_i = s_day_min_abs[d];
+        if (abs_i < 0 || abs_i < view_start || abs_i >= view_start + n) goto skip_min;
+        int lbl_y = YC(s_day_min_val[d]) + 2;
+        int lx = X(abs_i - view_start) - lbl_w / 2;
+        if (lx < day_x0) lx = day_x0;
+        if (lx + lbl_w > day_x1) lx = day_x1 - lbl_w;
+        /* Skip if horizontally overlapping left (°C) or right (mm/m/s) scale areas */
+        if (lx < 18 || lx + lbl_w > w - 18) goto skip_min;
+        /* Skip if overlapping with any previously drawn label */
+        { bool overlap = false;
+          for (int i = 0; i < drawn_n; i++) {
+            if (lx < drawn_lx[i] + lbl_w && lx + lbl_w > drawn_lx[i] &&
+                lbl_y < drawn_ly[i] + 30 && lbl_y + 30 > drawn_ly[i]) { overlap = true; break; }
+          }
+          if (overlap) goto skip_min; }
+        char lbl[8]; snprintf(lbl, sizeof(lbl), "%d\xc2\xb0", s_day_min_val[d]);
+        graphics_draw_text(ctx, lbl, f_small, GRect(lx, lbl_y, lbl_w, 14),
+                           GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+        if (drawn_n < MAX_DRAWN_LBLS) { drawn_lx[drawn_n] = lx; drawn_ly[drawn_n] = lbl_y; drawn_n++; }
+      }
+      skip_min:;
+    }
+#undef MAX_DRAWN_LBLS
+  }
+
+#undef X
+#undef Y
+#undef YC
+
+  /* ---- title bar (redrawn on top to cover any graph overflow) ---- */
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, GRect(0, 0, w, TITLE_HEIGHT), 0, GCornerNone);
+  graphics_context_set_stroke_color(ctx, GColorLightGray);
+  graphics_context_set_stroke_width(ctx, 1);
+  graphics_draw_line(ctx, GPoint(0, TITLE_HEIGHT - 1), GPoint(w, TITLE_HEIGHT - 1));
+
+  /* Location */
+  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_draw_text(ctx, s_location[0] ? s_location : "FMI Forecast", f_small,
+                     GRect(4, 3, w - 60, 14),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+  /* Zoom indicator */
+  char zoom_lbl[4];
+  snprintf(zoom_lbl, sizeof(zoom_lbl), "%dd", s_zoom_days);
+  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_draw_text(ctx, zoom_lbl, f_small,
+                     GRect(w - 58, 3, 14, 14),
+                     GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+
+  /* Current temperature */
+  if (s_current_idx >= 0 && s_current_idx < s_temp_count) {
+    char cur[8];
+    snprintf(cur, sizeof(cur), "%dC\xc2\xb0", (int)s_temps[s_current_idx]);
+    graphics_context_set_text_color(ctx,
+      PBL_IF_COLOR_ELSE(GColorDarkCandyAppleRed, GColorBlack));
+    graphics_draw_text(ctx, cur, f_bold,
+                       GRect(w - 46, 0, 44, TITLE_HEIGHT),
+                       GTextOverflowModeWordWrap, GTextAlignmentRight, NULL);
+  }
+}
+
+/* ---------- click handlers ---------- */
+
+static void prv_select_click(ClickRecognizerRef r, void *ctx) {
+  s_zoom_days = (s_zoom_days == 1) ? 5 : 1;
+  /* Clamp scroll to new view size */
+  int view_count = (s_zoom_days == 1) ? 24 : (s_zoom_days * 24);
+  int max_scroll = s_temp_count - view_count;
+  if (max_scroll < 0) max_scroll = 0;
+  if (s_scroll_offset > max_scroll) s_scroll_offset = max_scroll;
+  layer_mark_dirty(s_graph_layer);
+}
+
+static void prv_down_click(ClickRecognizerRef r, void *ctx) {
+  int step = (s_zoom_days == 1) ? 6 : 24;
+  int view_count = (s_zoom_days == 1) ? 24 : (s_zoom_days * 24);
+  int max_scroll = s_temp_count - view_count;
+  if (max_scroll < 0) max_scroll = 0;
+  s_scroll_offset += step;
+  if (s_scroll_offset > max_scroll) s_scroll_offset = max_scroll;
+  layer_mark_dirty(s_graph_layer);
+}
+
+static void prv_up_click(ClickRecognizerRef r, void *ctx) {
+  int step = (s_zoom_days == 1) ? 6 : 24;
+  s_scroll_offset -= step;
+  if (s_scroll_offset < 0) s_scroll_offset = 0;
+  layer_mark_dirty(s_graph_layer);
+}
+
+static void prv_click_config(void *ctx) {
+  window_single_click_subscribe(BUTTON_ID_SELECT, prv_select_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN,   prv_down_click);
+  window_single_click_subscribe(BUTTON_ID_UP,     prv_up_click);
+}
+
+/* ---------- window ---------- */
+
+static void prv_window_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(root);
+
+  s_graph_layer = layer_create(bounds);
+  layer_set_update_proc(s_graph_layer, prv_graph_update);
+  layer_add_child(root, s_graph_layer);
+
+  s_status_layer = text_layer_create(
+    GRect(bounds.size.w / 6, bounds.size.h / 2 - 30,
+          bounds.size.w * 2 / 3, 60));
+  text_layer_set_background_color(s_status_layer, GColorClear);
+  text_layer_set_text_color(s_status_layer, GColorBlack);
+  text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
+  text_layer_set_text(s_status_layer, "Loading\nforecast...");
+  layer_add_child(root, text_layer_get_layer(s_status_layer));
+
+  /* Direction arrow: tip up (north), rotated per bar */
+  static const GPoint arrow_pts[] = {{0, -5}, {-3, 3}, {3, 3}};
+  static const GPathInfo arrow_info = {3, (GPoint *)arrow_pts};
+  s_wind_arrow = gpath_create(&arrow_info);
+}
+
+static void prv_window_unload(Window *window) {
+  gpath_destroy(s_wind_arrow);
+  s_wind_arrow = NULL;
+  layer_destroy(s_graph_layer);
+  text_layer_destroy(s_status_layer);
+}
+
+/* ---------- init / deinit ---------- */
+
+static void prv_init(void) {
+  app_message_register_inbox_received(prv_inbox_received);
+  app_message_register_inbox_dropped(prv_inbox_dropped);
+  app_message_open(app_message_inbox_size_maximum(),
+                   app_message_outbox_size_maximum());
+
+  s_window = window_create();
+  window_set_background_color(s_window, GColorWhite);
+  window_set_click_config_provider(s_window, prv_click_config);
+  window_set_window_handlers(s_window, (WindowHandlers){
+    .load   = prv_window_load,
+    .unload = prv_window_unload,
+  });
+  window_stack_push(s_window, true);
+
+  prv_request_data();
+}
+
+static void prv_deinit(void) {
+  window_destroy(s_window);
+}
+
+int main(void) {
+  prv_init();
+  app_event_loop();
+  prv_deinit();
+}
