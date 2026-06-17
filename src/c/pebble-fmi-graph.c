@@ -3,7 +3,7 @@
 
 #define MAX_TEMPS         240
 #define TITLE_HEIGHT      20
-#define CLOUD_HEIGHT      7
+#define CLOUD_HEIGHT      12
 #define TLABEL_HEIGHT     14
 #define BOTTOM_PAD        -1
 
@@ -28,6 +28,7 @@ static int        s_wind_count       = 0;
 static int        s_wind_gust_count  = 0;
 static int        s_cloud_count      = 0;
 static int        s_current_idx      = 0;
+static int        s_current_min      = 0;
 static int        s_local_start_h    = 0;
 static int        s_local_start_wday = 0;  /* JS getDay(): 0=Sun */
 static int        s_local_start_day  = 1;  /* day of month */
@@ -49,7 +50,8 @@ static int s_day_abs_end[MAX_DAYS];
 
 /* ---------- helpers ---------- */
 
-/* Compute per-calendar-day min/max from fixed midnight-aligned grid. Called once after data loads. */
+/* Compute per-calendar-day min/max from fixed midnight-aligned grid. Called once after data loads.
+   Min = coldest in night (hours 0-7), Max = warmest in daytime (hours 8-19). Independent. */
 static void prv_compute_daily_stats(void) {
   s_day_count = 0;
   if (s_temp_count < 2) return;
@@ -60,20 +62,25 @@ static void prv_compute_daily_stats(void) {
     int seg_end = seg_start + seg_len - 1;
     if (seg_end >= s_temp_count) seg_end = s_temp_count - 1;
     if (seg_end > seg_start) {  /* need at least 2 hours */
-      /* Min: scan forward from day start */
-      int min_val = (int)s_temps[seg_start], min_abs = seg_start;
-      for (int i = seg_start + 1; i <= seg_end; i++) {
+      /* Night range: hours 0..7 of the day */
+      int night_end = seg_start + 7;
+      if (night_end > seg_end) night_end = seg_end;
+      int min_val = INT_MAX, min_abs = -1;
+      for (int i = seg_start; i <= night_end; i++) {
         int t = (int)s_temps[i];
         if (t < min_val) { min_val = t; min_abs = i; }
       }
-      /* Max: scan backward from day end, only after min_abs */
+      /* Daytime range: hours 8..23 of the day */
+      int day_s = seg_start + 8;
+      int day_e = seg_start + 23;
+      if (day_e > seg_end) day_e = seg_end;
       int max_val = INT_MIN, max_abs = -1;
-      for (int i = seg_end; i > min_abs; i--) {
-        int t = (int)s_temps[i];
-        if (t > max_val) { max_val = t; max_abs = i; }
+      if (day_s <= seg_end) {
+        for (int i = day_s; i <= day_e; i++) {
+          int t = (int)s_temps[i];
+          if (t > max_val) { max_val = t; max_abs = i; }
+        }
       }
-      /* If no point exists after the minimum, suppress both labels */
-      if (max_abs < 0) { min_abs = -1; }
       s_day_min_val[s_day_count] = min_val;
       s_day_max_val[s_day_count] = max_val;
       s_day_min_abs[s_day_count] = min_abs;
@@ -113,6 +120,11 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
   s_status = (AppStatus)status_t->value->int32;
 
   if (s_status == STATUS_READY) {
+    /* Reset optional component counts; only set if keys are present in message */
+    s_wind_count = 0;
+    s_wind_gust_count = 0;
+    s_cloud_count = 0;
+
     Tuple *temps_t  = dict_find(iter, MESSAGE_KEY_TEMPERATURES);
     Tuple *precip_t = dict_find(iter, MESSAGE_KEY_PRECIPITATION);
     Tuple *wspd_t   = dict_find(iter, MESSAGE_KEY_WIND_SPEED);
@@ -161,6 +173,8 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
       for (int i = 0; i < n; i++) s_wind_gust[i] = raw[i];
     }
     if (idx_t) s_current_idx      = (int)idx_t->value->int32;
+    Tuple *min_t = dict_find(iter, MESSAGE_KEY_CURRENT_MINUTE);
+    if (min_t) s_current_min = (int)min_t->value->int32;
     if (sh_t)  s_local_start_h    = (int)sh_t->value->int32;
     if (wd_t)  s_local_start_wday = (int)wd_t->value->int32;
     Tuple *day_t = dict_find(iter, MESSAGE_KEY_LOCAL_START_DAY);
@@ -168,7 +182,8 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
     if (day_t) s_local_start_day = (int)day_t->value->int32;
     if (mon_t) s_local_start_mon = (int)mon_t->value->int32;
     if (loc_t) snprintf(s_location, sizeof(s_location), "%s", loc_t->value->cstring);
-    s_scroll_offset = 0;
+    int block_start = (s_current_idx / 3) * 3;
+    s_scroll_offset = (block_start > 6) ? block_start - 6 : 0;
     prv_compute_daily_stats();
   }
 
@@ -186,7 +201,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   const int w  = bounds.size.w;
   const int h  = bounds.size.h;
-  const int gt = TITLE_HEIGHT + CLOUD_HEIGHT;
+  const int gt = TITLE_HEIGHT + (s_cloud_count > 0 ? CLOUD_HEIGHT : 0);
   const int gb = h - TLABEL_HEIGHT - BOTTOM_PAD;
   const int gh = gb - gt;
   const int precip_top = gt + 3;  /* small gap below cloud strip; also top of vertical grid lines */
@@ -221,17 +236,18 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
   /* ---- cloud cover strip (between title bar and graph) ---- */
   if (s_cloud_count > 0) {
     const int cloud_gap = 2;                          /* px gap below title bar separator */
-    const int cloud_max_h = CLOUD_HEIGHT - cloud_gap; /* 5px usable, always odd */
+    const int cloud_max_h = CLOUD_HEIGHT - cloud_gap; /* 10px usable */
     const int strip_mid = TITLE_HEIGHT + cloud_gap + cloud_max_h / 2;
     graphics_context_set_fill_color(ctx, GColorLightGray);
     for (int i = 0; i < n; i++) {
       int abs_i = view_start + i;
       if (abs_i >= s_cloud_count) break;
       uint8_t cv = s_cloud[abs_i];
-      if (cv == 255) continue;  /* NaN */
-      int band_h = (int)cv * cloud_max_h / 100;
-      if (band_h > 0 && (band_h % 2 == 0)) band_h--;  /* round down to odd */
-      if (band_h < 1) continue;
+      if (cv == 255 || cv == 0) continue;  /* NaN or clear */
+      /* Quantize to 5 steps of 20%: 2, 4, 6, 8, 10 px */
+      int step = ((int)cv + 19) / 20;      /* 1..5 */
+      int band_h = step * 2;               /* 2, 4, 6, 8, 10 px */
+      if (band_h > cloud_max_h) band_h = cloud_max_h;
       int x0 = X(i);
       int x1 = X(i + 1);
       int bw = x1 - x0;
@@ -299,6 +315,22 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
       if (rel_idx >= n) break;
       int tx = X(rel_idx);
       graphics_draw_line(ctx, GPoint(tx, precip_top), GPoint(tx, h));
+    }
+  }
+
+  /* ---- "now" dotted vertical marker (drawn after grid lines, under all other content) ---- */
+  {
+    int now_i = s_current_idx - view_start;
+    if (now_i >= 0 && now_i < n) {
+      /* Interpolate between hour tick and next for minute precision */
+      int nx = X(now_i) + (X(now_i + 1) - X(now_i)) * s_current_min / 60;
+      graphics_context_set_stroke_color(ctx, GColorLightGray);
+      graphics_context_set_stroke_width(ctx, 2);
+      for (int y = precip_top; y < gb + 1; y += 10) {
+        int y2 = y + 2;
+        if (y2 > gb + 1) y2 = gb + 1;
+        graphics_draw_line(ctx, GPoint(nx, y), GPoint(nx, y2));
+      }
     }
   }
 
@@ -456,17 +488,6 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
     graphics_draw_line(ctx,
       GPoint(X(i),     YC((int)s_temps[view_start + i])),
       GPoint(X(i + 1), YC((int)s_temps[view_start + i + 1])));
-  }
-
-  /* ---- "now" dashed vertical marker ---- */
-  int now_i = s_current_idx - view_start;
-  if (now_i >= 0 && now_i < n) {
-    int nx = X(now_i);
-    graphics_context_set_stroke_color(ctx, GColorLightGray);
-    graphics_context_set_stroke_width(ctx, 1);
-    for (int y = gt; y < gb; y += 5) {
-      graphics_draw_line(ctx, GPoint(nx, y), GPoint(nx, y + 3 < gb ? y + 3 : gb));
-    }
   }
 
   /* ---- wind scale labels (drawn after temp curve so they appear on top) ---- */
@@ -681,14 +702,6 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
   graphics_draw_text(ctx, s_location[0] ? s_location : "FMI Forecast", f_small,
                      GRect(4, 3, w - 60, 14),
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-
-  /* Zoom indicator */
-  char zoom_lbl[4];
-  snprintf(zoom_lbl, sizeof(zoom_lbl), "%dd", s_zoom_days);
-  graphics_context_set_text_color(ctx, GColorBlack);
-  graphics_draw_text(ctx, zoom_lbl, f_small,
-                     GRect(w - 58, 3, 14, 14),
-                     GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
   /* Current temperature */
   if (s_current_idx >= 0 && s_current_idx < s_temp_count) {

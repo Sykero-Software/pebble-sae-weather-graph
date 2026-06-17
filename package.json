@@ -41,7 +41,8 @@
       "WIND_GUST",
       "CLOUD_COVER",
       "LOCAL_START_DAY",
-      "LOCAL_START_MONTH"
+      "LOCAL_START_MONTH",
+      "CURRENT_MINUTE"
     ],
     "resources": {
       "media": []

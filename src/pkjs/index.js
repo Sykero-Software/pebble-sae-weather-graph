@@ -1,9 +1,17 @@
 /* global Pebble, XMLHttpRequest */
 
 var MAX_TEMPS = 240;
+var DEBUG_FORCE_ECMWF = false;     /* set true to always use ECMWF endpoint */
+var DEBUG_COORDS = false;          /* set true to use test coordinates */
+var DEBUG_LAT = 48.0941, DEBUG_LON = 7.9604;  /* Some random smallish town in Germany */
 var FMI_WFS_BASE = 'https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0' +
   '&request=getFeature' +
   '&storedquery_id=fmi::forecast::edited::weather::scandinavia::point::timevaluepair' +
+  '&parameters=Temperature,Precipitation1h,WindSpeedMS,WindDirection,HourlyMaximumGust,TotalCloudCover&timestep=60';
+
+var FMI_WFS_ECMWF = 'https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0' +
+  '&request=getFeature' +
+  '&storedquery_id=ecmwf::forecast::surface::point::timevaluepair' +
   '&parameters=Temperature,Precipitation1h,WindSpeedMS,WindDirection,HourlyMaximumGust,TotalCloudCover&timestep=60';
 
 var pendingFetch = false;
@@ -23,6 +31,15 @@ function fetchForecast() {
   if (pendingFetch) return;
   pendingFetch = true;
 
+  if (DEBUG_COORDS) {
+    if (DEBUG_FORCE_ECMWF) {
+      fetchECMWF(DEBUG_LAT, DEBUG_LON, 'Waldkirch');
+    } else {
+      fetchForLatLon(DEBUG_LAT, DEBUG_LON, 'Waldkirch');
+    }
+    return;
+  }
+
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       function (pos) {
@@ -41,30 +58,67 @@ function fetchForecast() {
 function fetchForLatLon(lat, lon, fallbackName) {
   var now = new Date();
   var startTime = new Date(now);
-  startTime.setMinutes(0, 0, 0);
+  startTime.setHours(0, 0, 0, 0);  /* 00:00 of current day */
+  startTime.setDate(startTime.getDate() - 1);  /* back one day → 00:00 yesterday */
 
   var endTime = new Date(startTime.getTime() + MAX_TEMPS * 60 * 60 * 1000);
 
-  var url = FMI_WFS_BASE +
-    '&latlon=' + lat.toFixed(4) + ',' + lon.toFixed(4) +
+  var suffix = '&latlon=' + lat.toFixed(4) + ',' + lon.toFixed(4) +
     '&starttime=' + toIsoString(startTime) +
     '&endtime=' + toIsoString(endTime);
 
-  console.log('Fetching FMI: ' + url);
+  var url = FMI_WFS_BASE + suffix;
+  console.log('Fetching FMI Scandinavia: ' + url);
 
   var xhr = new XMLHttpRequest();
   xhr.onload = function () {
-    pendingFetch = false;
     if (xhr.status === 200) {
-      parseAndSend(xhr.responseText, startTime, fallbackName);
+      var temps = extractSeries(xhr.responseText, 'Temperature').filter(function(v) { return !isNaN(v); });
+      if (!DEBUG_FORCE_ECMWF && temps.length > 0) {
+        pendingFetch = false;
+        parseAndSend(xhr.responseText, startTime, fallbackName);
+      } else {
+        console.log('Scandinavia endpoint returned no data, trying ECMWF');
+        fetchECMWF(lat, lon, fallbackName);
+      }
     } else {
-      console.log('HTTP error: ' + xhr.status);
-      sendStatus(2);
+      console.log('HTTP error: ' + xhr.status + ', trying ECMWF');
+      fetchECMWF(lat, lon, fallbackName);
     }
   };
   xhr.onerror = function () {
     pendingFetch = false;
     console.log('XHR error');
+    sendStatus(2);
+  };
+  xhr.open('GET', url);
+  xhr.send();
+}
+
+function fetchECMWF(lat, lon, fallbackName) {
+  /* ECMWF data starts from UTC midnight of the current day */
+  var now = new Date();
+  var ecmwfStart = new Date(now);
+  ecmwfStart.setUTCHours(0, 0, 0, 0);
+  var ecmwfEnd = new Date(ecmwfStart.getTime() + MAX_TEMPS * 60 * 60 * 1000);
+  var suffix = '&latlon=' + lat.toFixed(4) + ',' + lon.toFixed(4) +
+    '&starttime=' + toIsoString(ecmwfStart) +
+    '&endtime=' + toIsoString(ecmwfEnd);
+  var url = FMI_WFS_ECMWF + suffix;
+  console.log('Fetching ECMWF: ' + url);
+  var xhr = new XMLHttpRequest();
+  xhr.onload = function () {
+    pendingFetch = false;
+    if (xhr.status === 200) {
+      parseAndSend(xhr.responseText, ecmwfStart, fallbackName);
+    } else {
+      console.log('ECMWF HTTP error: ' + xhr.status);
+      sendStatus(2);
+    }
+  };
+  xhr.onerror = function () {
+    pendingFetch = false;
+    console.log('ECMWF XHR error');
     sendStatus(2);
   };
   xhr.open('GET', url);
@@ -164,8 +218,9 @@ function parseAndSend(xml, startTime, fallbackName) {
 
   // Which array index corresponds to "now"
   var nowMs = Date.now();
-  var currentIndex = Math.round((nowMs - startTime.getTime()) / 3600000);
+  var currentIndex = Math.floor((nowMs - startTime.getTime()) / 3600000);
   currentIndex = Math.max(0, Math.min(currentIndex, temperatures.length - 1));
+  var currentMinute = new Date(nowMs).getMinutes();
 
   var nonZeroPrecip = precipByteArray.filter(function(v) { return v > 0; }).length;
   var nonNaNWind = wspdByteArray.filter(function(v) { return v !== 255; }).length;
@@ -174,22 +229,25 @@ function parseAndSend(xml, startTime, fallbackName) {
   console.log('Sending ' + temperatures.length + ' temps, ' + nonZeroPrecip + ' precip buckets, ' +
     nonNaNWind + ' wind values, ' + nonNaNGust + ' gust values, ' + nonNaNCloud + ' cloud values, current index=' + currentIndex + ', location=' + locationName);
 
-  Pebble.sendAppMessage(
-    {
+  var msg = {
       STATUS: 1,
       TEMPERATURES: byteArray,
       PRECIPITATION: precipByteArray,
-      WIND_SPEED: wspdByteArray,
-      WIND_DIRECTION: wdirByteArray,
-      WIND_GUST: wgustByteArray,
-      CLOUD_COVER: cloudByteArray,
       LOCAL_START_HOUR: localStartHour,
       LOCAL_START_WEEKDAY: startTime.getDay(),
       LOCAL_START_DAY: startTime.getDate(),
       LOCAL_START_MONTH: startTime.getMonth() + 1,
       CURRENT_INDEX: currentIndex,
+      CURRENT_MINUTE: currentMinute,
       LOCATION_NAME: locationName.substring(0, 32)
-    },
+  };
+  if (nonNaNWind > 0)  { msg.WIND_SPEED     = wspdByteArray; }
+  if (nonNaNWind > 0)  { msg.WIND_DIRECTION = wdirByteArray; }
+  if (nonNaNGust > 0)  { msg.WIND_GUST      = wgustByteArray; }
+  if (nonNaNCloud > 0) { msg.CLOUD_COVER    = cloudByteArray; }
+
+  Pebble.sendAppMessage(
+    msg,
     function () { console.log('Data sent OK'); },
     function (err) {
       console.log('Send error: ' + JSON.stringify(err));
