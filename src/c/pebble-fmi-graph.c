@@ -237,7 +237,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
   if (n < 2) return;
 
 #define X(i)  ((i) * w / n)
-#define Y(t)  (gb - ((t) - dmin) * gh / rng)
+#define Y(t)  (y_low - ((t) - g_low) * (y_low - y_high) / (g_high - g_low))
 #define YC(t) ({ int _y = Y(t); _y < gt ? gt : (_y > gb ? gb : _y); })
 
   /* ---- cloud cover strip (between title bar and graph) ---- */
@@ -264,31 +264,26 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
     }
   }
 
-  /* ---- temperature range over ALL data (equal scale across zoom levels) ---- */
+  /* ---- temperature scale: anchor grid lines to data ---- */
   int min_t = (int)s_temps[0], max_t = (int)s_temps[0];
   for (int i = 1; i < s_temp_count; i++) {
     int t = (int)s_temps[i];
     if (t < min_t) min_t = t;
     if (t > max_t) max_t = t;
   }
-  int dmax = max_t + 3;
-  /* Compute bottom padding so Y(min_t) >= TLABEL_HEIGHT+5 px above gb,
-     ensuring min-temp labels clear the weekday row in zoomed-in view.
-     Constraint: bot_pad * (gh - pad_px) >= pad_px * (dmax - min_t) */
-  int pad_px = 2 * TLABEL_HEIGHT + 5;
-  int bot_pad = 2;
-  if (gh > pad_px) {
-    int needed = (pad_px * (dmax - min_t) + gh - pad_px - 1) / (gh - pad_px);
-    if (needed > bot_pad) bot_pad = needed;
-  }
-  int dmin = min_t - bot_pad;
-  int rng  = dmax - dmin;
-  if (rng < 1) rng = 1;
+  /* g_low: nearest 5°C floor of min_t; g_high: nearest 5°C ceiling of max_t */
+  int g_low  = (min_t / 5) * 5 - (min_t < 0 && min_t % 5 ? 5 : 0);
+  if (g_low > min_t) g_low -= 5;
+  int g_high = (max_t / 5) * 5 + (max_t > 0 && max_t % 5 ? 5 : 0);
+  if (g_high < max_t) g_high += 5;
+  if (g_high == g_low) g_high = g_low + 5;  /* guard against flat data */
+  /* Fix pixel positions: g_low just above weekday labels, g_high with room for top label */
+  const int y_low  = gb - 3 - TLABEL_HEIGHT - 2;  /* 2px above top label row */
+  const int y_high = gt + 18;                      /* room for f_medium label + gap */
 
   /* ---- grid lines (every 5 °C) ---- */
   {
-    int g0 = (dmin / 5) * 5 - (dmin < 0 && dmin % 5 ? 5 : 0);
-    for (int t = g0; t <= dmax; t += 5) {
+    for (int t = g_low; t <= g_high; t += 5) {
       int y = Y(t);
       if (y <= gt || y >= gb) continue;
       graphics_context_set_stroke_color(ctx, GColorLightGray);
@@ -332,7 +327,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
     if (now_i >= 0 && now_i < n) {
       /* Interpolate between hour tick and next for minute precision */
       int nx = X(now_i) + (X(now_i + 1) - X(now_i)) * s_current_min / 60;
-      graphics_context_set_stroke_color(ctx, GColorLightGray);
+      graphics_context_set_stroke_color(ctx, GColorDarkGray);
       graphics_context_set_stroke_width(ctx, 2);
       for (int y = precip_top; y < gb + 1; y += 10) {
         int y2 = y + 2;
@@ -532,8 +527,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
 
   /* ---- temperature y-axis labels (drawn on top) ---- */
   {
-    int g0 = (dmin / 5) * 5 - (dmin < 0 && dmin % 5 ? 5 : 0);
-    for (int t = g0; t <= dmax; t += 5) {
+    for (int t = g_low; t <= g_high; t += 5) {
       int y = Y(t);
       if (y <= gt || y >= gb) continue;
       char lbl[10]; snprintf(lbl, sizeof(lbl), "%d\xc2\xb0", t);
@@ -792,12 +786,21 @@ static void prv_start_scroll_anim(int target) {
 
 static int s_zoom_vc_start  = 24;
 static int s_zoom_vc_target = 24;
+static int s_zoom_anchor    = 0;  /* data index at 1/4 screen width, fixed during zoom */
 
 static void prv_zoom_anim_update(Animation *anim, const AnimationProgress progress) {
   (void)anim;
   s_view_count = s_zoom_vc_start +
     (int)((s_zoom_vc_target - s_zoom_vc_start) * (int32_t)progress / ANIMATION_NORMALIZED_MAX);
   if (s_view_count < 1) s_view_count = 1;
+  /* Keep 1/4-screen data index fixed */
+  int new_scroll = s_zoom_anchor - s_view_count / 4;
+  int max_scroll = s_temp_count - s_view_count;
+  if (max_scroll < 0) max_scroll = 0;
+  if (new_scroll < 0) new_scroll = 0;
+  if (new_scroll > max_scroll) new_scroll = max_scroll;
+  s_scroll_offset = new_scroll;
+  s_scroll_target = new_scroll;
   layer_mark_dirty(s_graph_layer);
 }
 
@@ -838,11 +841,8 @@ static void prv_start_zoom_anim(int vc_target) {
 static void prv_select_click(ClickRecognizerRef r, void *ctx) {
   s_zoom_days = (s_zoom_days == 1) ? 5 : 1;
   int vc_target = s_zoom_days * 24;
-  /* Clamp scroll to new range */
-  int max_scroll = s_temp_count - vc_target;
-  if (max_scroll < 0) max_scroll = 0;
-  if (s_scroll_offset > max_scroll) s_scroll_offset = max_scroll;
-  s_scroll_target = s_scroll_offset;
+  /* Fix the data index at 1/4 screen width */
+  s_zoom_anchor = s_scroll_offset + s_view_count / 4;
   prv_start_zoom_anim(vc_target);
 }
 
