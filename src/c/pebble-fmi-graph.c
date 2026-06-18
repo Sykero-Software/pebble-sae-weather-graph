@@ -34,8 +34,8 @@ static int        s_local_start_wday = 0;  /* JS getDay(): 0=Sun */
 static int        s_local_start_day  = 1;  /* day of month */
 static int        s_local_start_mon  = 1;  /* month 1-12 */
 static char       s_location[33]     = "";
-static int        s_zoom_days        = 1;  /* 1 or 5 */
-static int        s_view_count       = 24; /* animated: current view width in hours */
+static int        s_zoom_days        = 5;  /* 1 or 5 */
+static int        s_view_count       = 120; /* animated: current view width in hours */
 static Animation *s_zoom_anim        = NULL;
 static int        s_scroll_offset    = 0;  /* hours scrolled forward */
 static int        s_scroll_target    = 0;
@@ -188,8 +188,8 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
     if (day_t) s_local_start_day = (int)day_t->value->int32;
     if (mon_t) s_local_start_mon = (int)mon_t->value->int32;
     if (loc_t) snprintf(s_location, sizeof(s_location), "%s", loc_t->value->cstring);
-    int block_start = (s_current_idx / 3) * 3;
-    s_scroll_offset = (block_start > 6) ? block_start - 6 : 0;
+    int initial_offset = s_current_idx - 36;
+    s_scroll_offset = (initial_offset > 0) ? initial_offset : 0;
     s_scroll_target = s_scroll_offset;
     prv_compute_daily_stats();
   }
@@ -240,10 +240,12 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
 #define Y(t)  (y_low - ((t) - g_low) * (y_low - y_high) / (g_high - g_low))
 #define YC(t) ({ int _y = Y(t); _y < gt ? gt : (_y > gb ? gb : _y); })
 #define DRAW_SHADOWED(text, font, rect, overflow, align) do { \
-  graphics_context_set_text_color(ctx, GColorWhite); \
-  graphics_draw_text(ctx, text, font, \
-    GRect((rect).origin.x+1, (rect).origin.y+1, (rect).size.w, (rect).size.h), \
-    overflow, align, NULL); \
+  if (!s_animating) { \
+    graphics_context_set_text_color(ctx, GColorWhite); \
+    graphics_draw_text(ctx, text, font, \
+      GRect((rect).origin.x+1, (rect).origin.y+1, (rect).size.w, (rect).size.h), \
+      overflow, align, NULL); \
+  } \
   graphics_context_set_text_color(ctx, GColorBlack); \
   graphics_draw_text(ctx, text, font, rect, overflow, align, NULL); \
 } while(0)
@@ -364,23 +366,18 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
   if      (precip_max_p <= 40)  precip_max_p = 30;
   else if (precip_max_p <= 100) precip_max_p = 100;
   else                          precip_max_p = 150;
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "mm scale: max_p=%d (%dmm), bar_h=%d, scale_half=%d",
-          precip_max_p, precip_max_p / 10, precip_max_bar_h, scale_half);
 
   /* ---- precipitation mm axis ticks (lines only, labels drawn later on top) ---- */
   if (s_precip_count > 0) {
     int tick_step = 5;
     if (precip_max_p <= 100) tick_step = 10;      /* ≤10mm: 1mm steps */
     else tick_step = 30;                           /* >10mm: 3mm steps */
-    APP_LOG(APP_LOG_LEVEL_DEBUG, "mm ticks: tick_step=%d (%dmm), ticks from %dmm to %dmm",
-            tick_step, tick_step / 10, tick_step / 10, precip_max_p / 10);
     graphics_context_set_stroke_color(ctx, GColorLightGray);
     graphics_context_set_stroke_width(ctx, 1);
     graphics_draw_line(ctx, GPoint(w - 13, precip_top), GPoint(w, precip_top));
     for (int p = tick_step; p <= precip_max_p; p += tick_step) {
       int by = precip_top + p * precip_max_bar_h / precip_max_p;
       if (by < precip_top || by > precip_top + precip_max_bar_h) continue;
-      APP_LOG(APP_LOG_LEVEL_DEBUG, "  tick p=%d (%dmm) -> y=%d", p, p / 10, by);
       graphics_context_set_stroke_color(ctx, GColorLightGray);
       graphics_context_set_stroke_width(ctx, 1);
       graphics_draw_line(ctx, GPoint(w - 13, by), GPoint(w, by));
@@ -454,8 +451,8 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
       graphics_fill_rect(ctx, GRect(bx, y_gust, bw, bar_h), 0, GCornerNone);
     }
 
-    /* Direction arrows (zoomed-in only) */
-    if (s_zoom_days == 1 && s_wind_arrow) {
+    /* Direction arrows (zoomed-in only, not during animations) */
+    if (s_zoom_days == 1 && s_wind_arrow && !s_animating) {
       graphics_context_set_fill_color(ctx, GColorDarkGray);
       graphics_context_set_stroke_color(ctx, GColorDarkGray);
       graphics_context_set_stroke_width(ctx, 1);
@@ -558,7 +555,6 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
       if (show_lbl) {
         char lbl[6];
         snprintf(lbl, sizeof(lbl), "%d", p / 10);
-        APP_LOG(APP_LOG_LEVEL_DEBUG, "  label '%s' at y=%d", lbl, by);
         DRAW_SHADOWED(lbl, f_medium, GRect(w - 30, by - 16, 28, 18),
                       GTextOverflowModeWordWrap, GTextAlignmentRight);
       }
@@ -595,13 +591,15 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
         while (dd > days_in_month[mm]) { dd -= days_in_month[mm]; mm++; if (mm > 12) mm = 1; }
         char day_lbl[16];
         snprintf(day_lbl, sizeof(day_lbl), "%s %d.%d.", day_names[weekday], dd, mm);
-        graphics_context_set_text_color(ctx, GColorWhite);
-        graphics_draw_text(ctx, day_lbl, f_small,
-                           GRect(tx + 4, gb - 3 - TLABEL_HEIGHT - 1, 70, TLABEL_HEIGHT),
-                           GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
-        graphics_draw_text(ctx, day_lbl, f_small,
-                           GRect(tx + 4, gb - 3 - TLABEL_HEIGHT + 1, 70, TLABEL_HEIGHT),
-                           GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+        if (!s_animating) {
+          graphics_context_set_text_color(ctx, GColorWhite);
+          graphics_draw_text(ctx, day_lbl, f_small,
+                             GRect(tx + 4, gb - 3 - TLABEL_HEIGHT - 1, 70, TLABEL_HEIGHT),
+                             GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+          graphics_draw_text(ctx, day_lbl, f_small,
+                             GRect(tx + 4, gb - 3 - TLABEL_HEIGHT + 1, 70, TLABEL_HEIGHT),
+                             GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+        }
         graphics_context_set_text_color(ctx, GColorBlack);
         graphics_draw_text(ctx, day_lbl, f_small,
                            GRect(tx + 4, gb - 3 - TLABEL_HEIGHT, 70, TLABEL_HEIGHT),
@@ -626,13 +624,15 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
       while (dd > dim[mm]) { dd -= dim[mm]; mm++; if (mm > 12) mm = 1; }
       char date_lbl[8]; snprintf(date_lbl, sizeof(date_lbl), "%d.%d.", dd, mm);
       /* Weekday on top row, date on bottom row — with white shadow */
-      graphics_context_set_text_color(ctx, GColorWhite);
-      graphics_draw_text(ctx, day_names[weekday], f_small,
-                         GRect(tx + 4, gb - 3 - TLABEL_HEIGHT - 1, 40, TLABEL_HEIGHT - 1),
-                         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
-      graphics_draw_text(ctx, day_names[weekday], f_small,
-                         GRect(tx + 4, gb - 3 - TLABEL_HEIGHT + 1, 40, TLABEL_HEIGHT - 1),
-                         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+      if (!s_animating) {
+        graphics_context_set_text_color(ctx, GColorWhite);
+        graphics_draw_text(ctx, day_names[weekday], f_small,
+                           GRect(tx + 4, gb - 3 - TLABEL_HEIGHT - 1, 40, TLABEL_HEIGHT - 1),
+                           GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+        graphics_draw_text(ctx, day_names[weekday], f_small,
+                           GRect(tx + 4, gb - 3 - TLABEL_HEIGHT + 1, 40, TLABEL_HEIGHT - 1),
+                           GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+      }
       graphics_context_set_text_color(ctx, GColorBlack);
       graphics_draw_text(ctx, day_names[weekday], f_small,
                          GRect(tx + 4, gb - 3 - TLABEL_HEIGHT, 40, TLABEL_HEIGHT - 1),
