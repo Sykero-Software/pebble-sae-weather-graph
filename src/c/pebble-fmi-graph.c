@@ -351,7 +351,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
   if (g_high < max_t) g_high += t_step;
   if (g_high == g_low) g_high = g_low + t_step;  /* guard against flat data */
   /* Fix pixel positions: g_low just above weekday labels, g_high with room for top label */
-  const int y_low  = gb - 3 - TLABEL_HEIGHT - 6;  /* 6px above top label row (4px for sun bars) */
+  const int y_low  = gb - 3 - TLABEL_HEIGHT - 8;  /* 8px above top label row (2 gap + 2 bar + 1 gap + 3 tick) */
   const int y_high = gt + 18;                      /* room for f_medium label + gap */
 
   /* ---- grid lines (every t_step degrees) ---- */
@@ -661,20 +661,45 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
     }
   }
 
-  /* ---- sun condition bars (dark/golden hour strip below bottom grid line) ---- */
+  /* ---- sun condition bars + sunrise/sunset ticks ---- */
   if (s_sun_count > 0) {
-    const int sun_y = y_low + 2;  /* 2px bar centered in the 4px reserved band */
+    const int sun_y    = y_low + 2;   /* top of 2px bar */
+    const int tick_top = sun_y + 1;   /* overlaps bottom row of bar */
+    graphics_context_set_stroke_width(ctx, 1);
     for (int i = 0; i < n; i++) {
       int abs_i = view_start + i;
       if (abs_i >= s_sun_count) break;
       uint8_t sc = s_sun_cond[abs_i];
       if (sc == 0) continue;
-      GColor bar_color = (sc == 2) ? GColorDarkGray : GColorOrange;
+
+      /* decode base condition and optional tick */
+      uint8_t base = sc;
+      int tick_min = -1;
+      bool tick_rise = false;
+      if (sc >= 160) { base = 1; tick_min = sc - 160; tick_rise = false; }
+      else if (sc >= 100) { base = 1; tick_min = sc - 100; tick_rise = true; }
+
+      /* draw bar */
+      GColor bar_color = (base == 2) ? GColorDarkGray : GColorOrange;
       graphics_context_set_fill_color(ctx, bar_color);
       int bx = X(i);
       int bw = X(i + 1) - bx;
       if (bw < 1) bw = 1;
       graphics_fill_rect(ctx, GRect(bx, sun_y, bw, 2), 0, GCornerNone);
+
+      /* draw tick */
+      if (tick_min >= 0) {
+        int tx = bx + bw * tick_min / 60;
+        graphics_context_set_stroke_color(ctx, GColorOrange);
+        graphics_context_set_stroke_width(ctx, s_zoom_days == 1 ? 2 : 1);
+        if (tick_rise) {
+          /* "/" sunrise: crosses bar, slopes up left-to-right */
+          graphics_draw_line(ctx, GPoint(tx - 2, sun_y + 3), GPoint(tx + 2, sun_y - 1));
+        } else {
+          /* "\" sunset: crosses bar, slopes down left-to-right */
+          graphics_draw_line(ctx, GPoint(tx - 2, sun_y - 1), GPoint(tx + 2, sun_y + 3));
+        }
+      }
     }
   }
 

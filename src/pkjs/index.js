@@ -44,11 +44,29 @@ function solarElevationDeg(latDeg, lonDeg, date) {
   return Math.asin(Math.max(-1, Math.min(1, sinAlt))) * 180 / Math.PI;
 }
 
-function sunCondition(latDeg, lonDeg, date) {
-  var el = solarElevationDeg(latDeg, lonDeg, date);
-  if (el < -18) return 2;        /* astronomical darkness */
-  if (el >= -4 && el <= 6) return 1;  /* golden hour */
+function elToSunCond(el) {
+  if (el < -18) return 2;
+  if (el >= -4 && el <= 6) return 1;
   return 0;
+}
+
+/* Returns 0/1/2 for normal/golden/dark, or 100+min for sunrise golden,
+   160+min for sunset golden (min = 0-59 within the hour). */
+function sunConditionWithTick(lat, lon, startMs, i) {
+  var el0 = solarElevationDeg(lat, lon, new Date(startMs + i * 3600000));
+  var cond = elToSunCond(el0);
+  if (cond === 1) {
+    var el1 = solarElevationDeg(lat, lon, new Date(startMs + (i + 1) * 3600000));
+    if (el0 < 0 && el1 >= 0) {
+      var min = Math.max(0, Math.min(59, Math.round(-el0 / (el1 - el0) * 60)));
+      return 100 + min;  /* sunrise: 100-159 */
+    }
+    if (el0 >= 0 && el1 < 0) {
+      var min = Math.max(0, Math.min(59, Math.round(-el0 / (el1 - el0) * 60)));
+      return 160 + min;  /* sunset: 160-219 */
+    }
+  }
+  return cond;
 }
 
 function getTempUnit() {
@@ -248,9 +266,9 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
 
   var sunByteArray = [];
   var oLat = data.latitude, oLon = data.longitude;
+  var startMs = startTime.getTime();
   for (var i = 0; i < temperatures.length; i++) {
-    var hourDate = new Date(startTime.getTime() + i * 3600000);
-    sunByteArray.push(sunCondition(oLat, oLon, hourDate));
+    sunByteArray.push(sunConditionWithTick(oLat, oLon, startMs, i));
   }
 
   var msg = {
@@ -356,11 +374,11 @@ function parseAndSend(xml, startTime, lat, lon, fallbackName) {
     cloudByteArray.push(isNaN(c) ? 255 : Math.min(100, Math.round(c)));
   }
 
-  // Sun condition: 0=normal, 1=golden hour, 2=astronomical darkness
+  // Sun condition: 0=normal, 1=golden, 2=dark; 100+min=sunrise golden, 160+min=sunset golden
   var sunByteArray = [];
+  var startMs = startTime.getTime();
   for (var i = 0; i < temperatures.length; i++) {
-    var hourDate = new Date(startTime.getTime() + i * 3600000);
-    sunByteArray.push(sunCondition(lat, lon, hourDate));
+    sunByteArray.push(sunConditionWithTick(lat, lon, startMs, i));
   }
 
   // Extract location name
