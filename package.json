@@ -46,7 +46,8 @@
       "CURRENT_MINUTE",
       "TEMP_UNIT",
       "WIND_UNIT",
-      "PRECIP_UNIT"
+      "PRECIP_UNIT",
+      "SUN_CONDITION"
     ],
     "resources": {
       "media": []

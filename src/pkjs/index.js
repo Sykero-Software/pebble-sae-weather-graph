@@ -9,12 +9,47 @@ var DEBUG_FORCE_OPENMETEO = false;  /* set true to always use Open-Meteo endpoin
 var DEBUG_COORDS = null;  /* set to an object to use test coordinates */
 // var DEBUG_COORDS = { lat: 48.0941, lon: 7.9604, name: 'Waldkirch' };  /* Germany */
 // var DEBUG_COORDS = { lat: 62.2426, lon: 25.7473, name: 'Jyvaskyla' };  /* Jyväskylä center */
+// var DEBUG_COORDS = { lat: -33.9249, lon: 18.4241, name: 'Cape Town' };  /* Southern hemisphere */
 var FMI_WFS_BASE = 'https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0' +
   '&request=getFeature' +
   '&storedquery_id=fmi::forecast::edited::weather::scandinavia::point::timevaluepair' +
   '&parameters=Temperature,Precipitation1h,WindSpeedMS,WindDirection,HourlyMaximumGust,TotalCloudCover&timestep=60';
 
 var pendingFetch = false;
+
+function solarElevationDeg(latDeg, lonDeg, date) {
+  var JD = date.getTime() / 86400000.0 + 2440587.5;
+  var T = (JD - 2451545.0) / 36525.0;
+  var L0 = ((280.46646 + 36000.76983 * T) % 360 + 360) % 360;
+  var M  = ((357.52911 + 35999.05029 * T) % 360 + 360) % 360;
+  var Mrad = M * Math.PI / 180;
+  var C = (1.914602 - 0.004817 * T) * Math.sin(Mrad)
+        + 0.019993 * Math.sin(2 * Mrad)
+        + 0.000289 * Math.sin(3 * Mrad);
+  var sunLon = L0 + C;
+  var omega = 125.04 - 1934.136 * T;
+  var appLon = (sunLon - 0.00569 - 0.00478 * Math.sin(omega * Math.PI / 180)) * Math.PI / 180;
+  var eps = (23.439291111 - 0.013004167 * T + 0.00256 * Math.cos(omega * Math.PI / 180)) * Math.PI / 180;
+  var dec = Math.asin(Math.sin(eps) * Math.sin(appLon));
+  var RA  = Math.atan2(Math.cos(eps) * Math.sin(appLon), Math.cos(appLon));
+  var JD0 = Math.floor(JD - 0.5) + 0.5;
+  var D0  = JD0 - 2451545.0;
+  var T0  = D0 / 36525.0;
+  var UT = date.getUTCHours() + date.getUTCMinutes() / 60.0 + date.getUTCSeconds() / 3600.0;
+  var GMST = ((6.697374558 + 2400.0513369 * T0 + 1.00273790935 * UT) % 24 + 24) % 24;
+  var HA = ((GMST * 15 + lonDeg - RA * 180 / Math.PI) % 360 + 360) % 360;
+  if (HA > 180) HA -= 360;
+  var latRad = latDeg * Math.PI / 180;
+  var sinAlt = Math.sin(latRad) * Math.sin(dec) + Math.cos(latRad) * Math.cos(dec) * Math.cos(HA * Math.PI / 180);
+  return Math.asin(Math.max(-1, Math.min(1, sinAlt))) * 180 / Math.PI;
+}
+
+function sunCondition(latDeg, lonDeg, date) {
+  var el = solarElevationDeg(latDeg, lonDeg, date);
+  if (el < -18) return 2;        /* astronomical darkness */
+  if (el >= -4 && el <= 6) return 1;  /* golden hour */
+  return 0;
+}
 
 function getTempUnit() {
   try {
@@ -85,7 +120,7 @@ function fetchForLatLon(lat, lon, fallbackName) {
       var temps = extractSeries(xhr.responseText, 'Temperature').filter(function(v) { return !isNaN(v); });
       if (!DEBUG_FORCE_OPENMETEO && temps.length > 0) {
         pendingFetch = false;
-        parseAndSend(xhr.responseText, startTime, fallbackName);
+        parseAndSend(xhr.responseText, startTime, lat, lon, fallbackName);
       } else {
         console.log('Scandinavia endpoint returned no data, trying Open-Meteo');
         fetchOpenMeteo(lat, lon, fallbackName);
@@ -211,6 +246,13 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
   var nonNaNCloud = cloudByteArray.filter(function(v) { return v !== 255; }).length;
   console.log('Open-Meteo: ' + temperatures.length + ' temps, wind=' + nonNaNWind + ', cloud=' + nonNaNCloud + ', loc=' + locationName);
 
+  var sunByteArray = [];
+  var oLat = data.latitude, oLon = data.longitude;
+  for (var i = 0; i < temperatures.length; i++) {
+    var hourDate = new Date(startTime.getTime() + i * 3600000);
+    sunByteArray.push(sunCondition(oLat, oLon, hourDate));
+  }
+
   var msg = {
     STATUS: 1,
     TEMPERATURES: byteArray,
@@ -227,6 +269,7 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
   if (nonNaNWind > 0)  { msg.WIND_DIRECTION = wdirByteArray; }
   if (nonNaNGust > 0)  { msg.WIND_GUST      = wgustByteArray; }
   if (nonNaNCloud > 0) { msg.CLOUD_COVER    = cloudByteArray; }
+  msg.SUN_CONDITION = sunByteArray;
 
   Pebble.sendAppMessage(
     msg,
@@ -252,7 +295,7 @@ function extractSeries(xml, paramName) {
   return values;
 }
 
-function parseAndSend(xml, startTime, fallbackName) {
+function parseAndSend(xml, startTime, lat, lon, fallbackName) {
   var tempRaw   = extractSeries(xml, 'Temperature');
   var precipRaw = extractSeries(xml, 'Precipitation1h');
   var wspdRaw   = extractSeries(xml, 'WindSpeedMS');
@@ -313,6 +356,13 @@ function parseAndSend(xml, startTime, fallbackName) {
     cloudByteArray.push(isNaN(c) ? 255 : Math.min(100, Math.round(c)));
   }
 
+  // Sun condition: 0=normal, 1=golden hour, 2=astronomical darkness
+  var sunByteArray = [];
+  for (var i = 0; i < temperatures.length; i++) {
+    var hourDate = new Date(startTime.getTime() + i * 3600000);
+    sunByteArray.push(sunCondition(lat, lon, hourDate));
+  }
+
   // Extract location name
   var locMatch = xml.match(
     /<gml:name codeSpace="http:\/\/xml\.fmi\.fi\/namespace\/locationcode\/name">([^<]+)<\/gml:name>/
@@ -358,6 +408,7 @@ function parseAndSend(xml, startTime, fallbackName) {
   if (nonNaNWind > 0)  { msg.WIND_DIRECTION = wdirByteArray; }
   if (nonNaNGust > 0)  { msg.WIND_GUST      = wgustByteArray; }
   if (nonNaNCloud > 0) { msg.CLOUD_COVER    = cloudByteArray; }
+  msg.SUN_CONDITION = sunByteArray;
 
   Pebble.sendAppMessage(
     msg,
