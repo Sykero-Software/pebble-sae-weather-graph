@@ -139,6 +139,7 @@ function fetchForLatLon(lat, lon, fallbackName) {
       if (!DEBUG_FORCE_OPENMETEO && temps.length > 0) {
         pendingFetch = false;
         parseAndSend(xhr.responseText, startTime, lat, lon, fallbackName);
+        fetchAndSendUV(lat, lon, startTime);
       } else {
         console.log('Scandinavia endpoint returned no data, trying Open-Meteo');
         fetchOpenMeteo(lat, lon, fallbackName);
@@ -166,7 +167,7 @@ function fetchOpenMeteo(lat, lon, fallbackName) {
   var url = 'https://api.open-meteo.com/v1/forecast' +
     '?latitude=' + lat.toFixed(4) +
     '&longitude=' + lon.toFixed(4) +
-    '&hourly=temperature_2m,precipitation,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cloud_cover' +
+    '&hourly=temperature_2m,precipitation,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cloud_cover,uv_index' +
     '&wind_speed_unit=ms' +
     '&timeformat=unixtime' +
     '&forecast_days=9' +
@@ -192,6 +193,45 @@ function fetchOpenMeteo(lat, lon, fallbackName) {
   xhr.send();
 }
 
+
+function fetchAndSendUV(lat, lon, startTime) {
+  var url = 'https://api.open-meteo.com/v1/forecast' +
+    '?latitude=' + lat.toFixed(4) +
+    '&longitude=' + lon.toFixed(4) +
+    '&hourly=uv_index' +
+    '&timeformat=unixtime' +
+    '&forecast_days=9' +
+    '&past_days=1';
+  console.log('Fetching UV index: ' + url);
+  var xhr = new XMLHttpRequest();
+  xhr.onload = function () {
+    if (xhr.status !== 200) { console.log('UV fetch HTTP error: ' + xhr.status); return; }
+    var data;
+    try { data = JSON.parse(xhr.responseText); } catch(e) { console.log('UV JSON parse error: ' + e); return; }
+    var times = data.hourly.time;
+    var uvRaw = data.hourly.uv_index;
+    var startSec = startTime.getTime() / 1000;
+    var startIdx = 0;
+    for (var i = 0; i < times.length; i++) { if (times[i] >= startSec) { startIdx = i; break; } }
+    var uvByteArray = [];
+    for (var i = 0; i < MAX_TEMPS && (startIdx + i) < uvRaw.length; i++) {
+      var u = uvRaw[startIdx + i];
+      uvByteArray.push((u === null || u === undefined || isNaN(u)) ? 255 : Math.min(16, Math.round(u)));
+    }
+    var nonNaN = uvByteArray.filter(function(v) { return v !== 255; }).length;
+    if (nonNaN === 0) { console.log('UV: no valid values'); return; }
+    console.log('Sending UV index: ' + uvByteArray.length + ' values, non-NaN=' + nonNaN);
+    Pebble.sendAppMessage(
+      { UV_INDEX: uvByteArray },
+      function() { console.log('UV sent OK'); },
+      function(err) { console.log('UV send error: ' + JSON.stringify(err)); }
+    );
+  };
+  xhr.onerror = function() { console.log('UV fetch XHR error'); };
+  xhr.open('GET', url);
+  xhr.send();
+}
+
 function parseAndSendOpenMeteo(json, startTime, fallbackName) {
   var data;
   try { data = JSON.parse(json); } catch(e) {
@@ -208,6 +248,7 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
   var wdirRaw  = h.wind_direction_10m;
   var wgustRaw = h.wind_gusts_10m;
   var cloudRaw = h.cloud_cover;
+  var uvRaw    = h.uv_index;
 
   /* Find index of startTime (yesterday midnight local = UTC midnight - offset) */
   var startSec = startTime.getTime() / 1000;
@@ -220,7 +261,7 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
   if (count < 1) { console.log('Open-Meteo: no usable data'); sendStatus(2); return; }
 
   var temperatures = [];
-  var precipByteArray = [], wspdByteArray = [], wdirByteArray = [], wgustByteArray = [], cloudByteArray = [];
+  var precipByteArray = [], wspdByteArray = [], wdirByteArray = [], wgustByteArray = [], cloudByteArray = [], uvByteArray = [];
 
   for (var i = 0; i < count; i++) {
     var idx = startIdx + i;
@@ -242,6 +283,9 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
 
     var c = cloudRaw[idx];
     cloudByteArray.push((c === null || isNaN(c)) ? 255 : Math.min(100, Math.round(c)));
+
+    var u = uvRaw ? uvRaw[idx] : null;
+    uvByteArray.push((u === null || u === undefined || isNaN(u)) ? 255 : Math.min(16, Math.round(u)));
   }
 
   if (temperatures.length === 0) { console.log('Open-Meteo: empty temperatures'); sendStatus(2); return; }
@@ -288,6 +332,8 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
   if (nonNaNGust > 0)  { msg.WIND_GUST      = wgustByteArray; }
   if (nonNaNCloud > 0) { msg.CLOUD_COVER    = cloudByteArray; }
   msg.SUN_CONDITION = sunByteArray;
+  var nonNaNUV = uvByteArray.filter(function(v) { return v !== 255; }).length;
+  if (nonNaNUV > 0)    { msg.UV_INDEX       = uvByteArray; }
 
   Pebble.sendAppMessage(
     msg,

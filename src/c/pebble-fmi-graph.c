@@ -42,12 +42,14 @@ static uint8_t    s_wind_dir[MAX_TEMPS];    /* dir/360*254, 255=NaN */
 static uint8_t    s_wind_gust[MAX_TEMPS];   /* whole m/s, 255=NaN */
 static uint8_t    s_cloud[MAX_TEMPS];       /* 0-100%, 255=NaN */
 static uint8_t    s_sun_cond[MAX_TEMPS];    /* 0=normal, 1=golden, 2=dark */
+static uint8_t    s_uv[MAX_TEMPS];          /* 0-16, 255=NaN */
 static int        s_temp_count       = 0;
 static int        s_precip_count     = 0;
 static int        s_wind_count       = 0;
 static int        s_wind_gust_count  = 0;
 static int        s_cloud_count      = 0;
 static int        s_sun_count        = 0;
+static int        s_uv_count         = 0;
 static int        s_current_idx      = 0;
 static int        s_current_min      = 0;
 static int        s_local_start_h    = 0;
@@ -167,6 +169,16 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
     layer_mark_dirty(s_graph_layer);
   }
 
+  /* UV index may arrive as a separate follow-up message (no STATUS) */
+  Tuple *uv_followup_t = dict_find(iter, MESSAGE_KEY_UV_INDEX);
+  if (uv_followup_t && uv_followup_t->type == TUPLE_BYTE_ARRAY && !dict_find(iter, MESSAGE_KEY_STATUS)) {
+    int n = (int)uv_followup_t->length < MAX_TEMPS ? (int)uv_followup_t->length : MAX_TEMPS;
+    s_uv_count = n;
+    const uint8_t *raw = (const uint8_t *)uv_followup_t->value->data;
+    for (int i = 0; i < n; i++) s_uv[i] = raw[i];
+    layer_mark_dirty(s_graph_layer);
+  }
+
   Tuple *status_t = dict_find(iter, MESSAGE_KEY_STATUS);
   if (!status_t) return;
 
@@ -225,6 +237,13 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
       s_sun_count = n;
       const uint8_t *raw = (const uint8_t *)sun_t->value->data;
       for (int i = 0; i < n; i++) s_sun_cond[i] = raw[i];
+    }
+    Tuple *uv_t = dict_find(iter, MESSAGE_KEY_UV_INDEX);
+    if (uv_t && uv_t->type == TUPLE_BYTE_ARRAY) {
+      int n = (int)uv_t->length < MAX_TEMPS ? (int)uv_t->length : MAX_TEMPS;
+      s_uv_count = n;
+      const uint8_t *raw = (const uint8_t *)uv_t->value->data;
+      for (int i = 0; i < n; i++) s_uv[i] = raw[i];
     }
     Tuple *wgust_t = dict_find(iter, MESSAGE_KEY_WIND_GUST);
     if (wgust_t && wgust_t->type == TUPLE_BYTE_ARRAY) {
@@ -586,6 +605,57 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
     graphics_draw_line(ctx,
       GPoint(X(i),     YC(TC((int)s_temps[view_start + i]))),
       GPoint(X(i + 1), YC(TC((int)s_temps[view_start + i + 1]))));
+  }
+
+  /* ---- UV index curve (orange, bottom half of graph area) ---- */
+  if (s_uv_count > 0) {
+    const int uv_bot = y_low;
+    const int uv_top = (y_high + y_low) / 2;
+#define UV_Y(uv) (uv_bot - (uv) * (uv_bot - uv_top) / 16)
+    graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorOrange, GColorDarkGray));
+    graphics_context_set_stroke_width(ctx, 2);
+    int prev_x = -1, prev_y = -1, prev_uv = -1;
+    for (int i = 0; i < n; i++) {
+      int abs_i = view_start + i;
+      if (abs_i >= s_uv_count) break;
+      uint8_t uv = s_uv[abs_i];
+      if (uv == 255) { prev_x = prev_y = prev_uv = -1; continue; }
+      int cx = X(i), cy = UV_Y(uv);
+      if (cy < uv_top) cy = uv_top;
+      if (cy > uv_bot) cy = uv_bot;
+      /* draw segment if at least one endpoint is non-zero */
+      if (prev_x >= 0 && (uv > 0 || prev_uv > 0))
+        graphics_draw_line(ctx, GPoint(prev_x, prev_y), GPoint(cx, cy));
+      prev_x = cx; prev_y = cy; prev_uv = uv;
+    }
+    /* ---- UV daily peak labels (zoomed-in view only) ---- */
+    if (s_zoom_days == 1) {
+      graphics_context_set_text_color(ctx, GColorBlack);
+      int day_max_uv = -1, day_max_rel = -1;
+      for (int i = 0; i <= n; i++) {
+        int abs_i = view_start + i;
+        bool boundary = (i == n) || ((s_local_start_h + abs_i) % 24 == 0);
+        if (boundary && i > 0 && day_max_uv > 0 && day_max_rel >= 0) {
+          int cx = X(day_max_rel);
+          int cy = UV_Y(day_max_uv);
+          if (cy < uv_top) cy = uv_top;
+          if (cy > uv_bot) cy = uv_bot;
+          char lbl[3]; snprintf(lbl, sizeof(lbl), "%d", day_max_uv);
+          int num_w = (day_max_uv >= 10) ? 16 : 8;
+          DRAW_SHADOWED(lbl, f_medium, GRect(cx + 2, cy - 16, 20, 18),
+                        GTextOverflowModeWordWrap, GTextAlignmentLeft);
+          DRAW_SHADOWED("UV", f_tiny, GRect(cx + 2 + num_w, cy - 14, 20, 10),
+                        GTextOverflowModeWordWrap, GTextAlignmentLeft);
+          day_max_uv = -1; day_max_rel = -1;
+        }
+        if (i == n) break;
+        if (abs_i < s_uv_count) {
+          uint8_t uv = s_uv[abs_i];
+          if (uv != 255 && (int)uv > day_max_uv) { day_max_uv = uv; day_max_rel = i; }
+        }
+      }
+    }
+#undef UV_Y
   }
 
   /* ---- wind scale labels (drawn after temp curve so they appear on top) ---- */
