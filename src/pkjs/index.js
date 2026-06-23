@@ -6,12 +6,88 @@ var clay = new Clay(clayConfig, function() {
   var clayConfig = this;
 
   clayConfig.on(clayConfig.EVENTS.AFTER_BUILD, function() {
+    /* Autocomplete + single-line layout for preset location inputs */
     for (var i = 1; i <= 5; i++) {
       var item = clayConfig.getItemByMessageKey('PRESET_NAME_' + i);
-      if (item) {
-        addGeoAutocomplete(item.$manipulatorTarget[0]);
+      if (!item) continue;
+
+      /* Inline-override the block layout to make label+field one row */
+      var lbl = item.$element[0].querySelector('label.tap-highlight');
+      if (lbl) {
+        lbl.style.cssText = 'display:flex;align-items:center;padding:8px 16px;';
+        var labelSpan = lbl.querySelector('.label');
+        if (labelSpan) {
+          labelSpan.style.cssText = 'flex-shrink:0;padding:0;margin-right:10px;white-space:nowrap;';
+        }
+        var inputSpan = lbl.querySelector('.input');
+        if (inputSpan) {
+          inputSpan.style.cssText = 'flex:1;min-width:0;margin:0;position:relative;';
+        }
       }
+
+      addGeoAutocomplete(item.$manipulatorTarget[0]);
     }
+
+    /* Side-by-side 1d/5d toggles for each data selection item */
+    var pairs = [
+      ['SHOW_CLOUD_Z1',        'SHOW_CLOUD_Z5',        'Cloud cover'],
+      ['SHOW_PRECIP_Z1',       'SHOW_PRECIP_Z5',       'Precipitation'],
+      ['SHOW_HUMIDITY_Z1',     'SHOW_HUMIDITY_Z5',     'Relative humidity'],
+      ['SHOW_WIND_Z1',         'SHOW_WIND_Z5',         'Wind'],
+      ['SHOW_UV_Z1',           'SHOW_UV_Z5',           'UV index'],
+      ['SHOW_GOLDEN_HOUR_Z1',  'SHOW_GOLDEN_HOUR_Z5',  'Golden hour'],
+      ['SHOW_DARKNESS_Z1',     'SHOW_DARKNESS_Z5',     'Darkness'],
+      ['SHOW_DAWN_DUSK_Z1',    'SHOW_DAWN_DUSK_Z5',    'Dawn & dusk ticks']
+    ];
+
+    pairs.forEach(function(p) {
+      var item1 = clayConfig.getItemByMessageKey(p[0]);
+      var item5 = clayConfig.getItemByMessageKey(p[1]);
+      if (!item1 || !item5) return;
+
+      var el1 = item1.$element[0];
+      var el5 = item5.$element[0];
+
+      /* Move the input+graphic spans before the Z5 row is hidden */
+      var inputSpan1 = el1.querySelector('.input');
+      var inputSpan5 = el5.querySelector('.input');
+
+      /* Replace the outer <label> with a <div> to prevent auto-toggle-on-click */
+      var tapHL = el1.querySelector('.tap-highlight');
+      var rowDiv = document.createElement('div');
+      rowDiv.style.cssText = 'display:flex;align-items:center;padding:10px 16px;box-sizing:border-box;';
+      /* Discard existing children — we'll build fresh */
+      tapHL.parentNode.replaceChild(rowDiv, tapHL);
+
+      /* Name label */
+      var nameSpan = document.createElement('span');
+      nameSpan.textContent = p[2];
+      nameSpan.style.cssText = 'flex:1;font-size:16px;color:#fff;';
+      rowDiv.appendChild(nameSpan);
+
+      /* Remove the input spans from their current parents before moving */
+      if (inputSpan1 && inputSpan1.parentNode) inputSpan1.parentNode.removeChild(inputSpan1);
+      if (inputSpan5 && inputSpan5.parentNode) inputSpan5.parentNode.removeChild(inputSpan5);
+
+      /* Build a toggle group: label caption above the toggle switch */
+      function makeToggleGroup(caption, inputSpan) {
+        var lbl = document.createElement('label');
+        lbl.style.cssText = 'display:flex;flex-direction:column;align-items:center;' +
+          'cursor:pointer;margin-left:14px;padding:0;';
+        var cap = document.createElement('span');
+        cap.textContent = caption;
+        cap.style.cssText = 'font-size:10px;color:#888;margin-bottom:3px;line-height:1;';
+        lbl.appendChild(cap);
+        lbl.appendChild(inputSpan);
+        return lbl;
+      }
+
+      rowDiv.appendChild(makeToggleGroup('1d', inputSpan1));
+      rowDiv.appendChild(makeToggleGroup('5d', inputSpan5));
+
+      /* Hide Z5 row (its checkbox was moved; the row is now empty) */
+      el5.style.display = 'none';
+    });
   });
 
   function addGeoAutocomplete(input) {

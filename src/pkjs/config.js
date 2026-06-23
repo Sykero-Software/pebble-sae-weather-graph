@@ -1,13 +1,13 @@
 module.exports = [
   {
     "type": "heading",
-    "defaultValue": "Weather Graph"
+    "defaultValue": "Units & formats"
   },
   {
     "type": "select",
     "messageKey": "TEMP_UNIT",
     "defaultValue": 0,
-    "label": "Temperature Unit",
+    "label": "Temperature",
     "options": [
       { "label": "Celsius (°C)", "value": 0 },
       { "label": "Fahrenheit (°F)", "value": 1 }
@@ -17,7 +17,7 @@ module.exports = [
     "type": "select",
     "messageKey": "WIND_UNIT",
     "defaultValue": 0,
-    "label": "Wind Speed Unit",
+    "label": "Wind",
     "options": [
       { "label": "m/s", "value": 0 },
       { "label": "km/h", "value": 1 },
@@ -28,62 +28,130 @@ module.exports = [
     "type": "select",
     "messageKey": "PRECIP_UNIT",
     "defaultValue": 0,
-    "label": "Precipitation Unit",
+    "label": "Precipitation",
     "options": [
       { "label": "mm", "value": 0 },
       { "label": "inch", "value": 1 }
     ]
   },
   {
+    "type": "select",
+    "messageKey": "DATE_FORMAT",
+    "defaultValue": 0,
+    "label": "Date",
+    "options": [
+      { "label": "DD.MM.", "value": 0 },
+      { "label": "MM/DD", "value": 1 }
+    ]
+  },
+  {
+    "type": "select",
+    "messageKey": "TIME_FORMAT",
+    "defaultValue": 0,
+    "label": "Time",
+    "options": [
+      { "label": "24h", "value": 0 },
+      { "label": "12h (AM/PM)", "value": 1 }
+    ]
+  },
+  {
     "type": "heading",
-    "defaultValue": "Layers"
+    "defaultValue": "Data selection"
   },
   {
     "type": "toggle",
-    "messageKey": "SHOW_CLOUD",
-    "label": "Cloud cover",
+    "messageKey": "SHOW_CLOUD_Z1",
+    "label": "Cloud cover (1 day)",
     "defaultValue": true
   },
   {
     "type": "toggle",
-    "messageKey": "SHOW_PRECIP",
-    "label": "Precipitation",
+    "messageKey": "SHOW_CLOUD_Z5",
+    "label": "Cloud cover (5 days)",
     "defaultValue": true
   },
   {
     "type": "toggle",
-    "messageKey": "SHOW_HUMIDITY",
-    "label": "Relative humidity",
+    "messageKey": "SHOW_PRECIP_Z1",
+    "label": "Precipitation (1 day)",
     "defaultValue": true
   },
   {
     "type": "toggle",
-    "messageKey": "SHOW_WIND",
-    "label": "Wind speed & direction",
+    "messageKey": "SHOW_PRECIP_Z5",
+    "label": "Precipitation (5 days)",
     "defaultValue": true
   },
   {
     "type": "toggle",
-    "messageKey": "SHOW_UV",
-    "label": "UV index",
+    "messageKey": "SHOW_HUMIDITY_Z1",
+    "label": "Relative humidity (1 day)",
     "defaultValue": true
   },
   {
     "type": "toggle",
-    "messageKey": "SHOW_GOLDEN_HOUR",
-    "label": "Golden hour",
+    "messageKey": "SHOW_HUMIDITY_Z5",
+    "label": "Relative humidity (5 days)",
     "defaultValue": true
   },
   {
     "type": "toggle",
-    "messageKey": "SHOW_DARKNESS",
-    "label": "Darkness",
+    "messageKey": "SHOW_WIND_Z1",
+    "label": "Wind speed & direction (1 day)",
     "defaultValue": true
   },
   {
     "type": "toggle",
-    "messageKey": "SHOW_DAWN_DUSK",
-    "label": "Dawn & dusk ticks",
+    "messageKey": "SHOW_WIND_Z5",
+    "label": "Wind speed & direction (5 days)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "SHOW_UV_Z1",
+    "label": "UV index (1 day)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "SHOW_UV_Z5",
+    "label": "UV index (5 days)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "SHOW_GOLDEN_HOUR_Z1",
+    "label": "Golden hour (1 day)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "SHOW_GOLDEN_HOUR_Z5",
+    "label": "Golden hour (5 days)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "SHOW_DARKNESS_Z1",
+    "label": "Darkness (1 day)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "SHOW_DARKNESS_Z5",
+    "label": "Darkness (5 days)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "SHOW_DAWN_DUSK_Z1",
+    "label": "Dawn & dusk ticks (1 day)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "SHOW_DAWN_DUSK_Z5",
+    "label": "Dawn & dusk ticks (5 days)",
     "defaultValue": true
   },
   {
@@ -124,29 +192,6 @@ module.exports = [
     "defaultValue": "",
     "label": "Location 5",
     "attributes": { "placeholder": "", "maxlength": 32 }
-  },
-  {
-    "type": "heading",
-    "defaultValue": "Formats"
-  },  {
-    "type": "select",
-    "messageKey": "TIME_FORMAT",
-    "defaultValue": 0,
-    "label": "Time format",
-    "options": [
-      { "label": "24h", "value": 0 },
-      { "label": "12h (AM/PM)", "value": 1 }
-    ]
-  },
-  {
-    "type": "select",
-    "messageKey": "DATE_FORMAT",
-    "defaultValue": 0,
-    "label": "Date format",
-    "options": [
-      { "label": "DD.MM.", "value": 0 },
-      { "label": "MM/DD", "value": 1 }
-    ]
   },
   {
     "type": "submit",
