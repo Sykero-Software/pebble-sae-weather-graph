@@ -23,9 +23,11 @@ typedef struct {
   uint8_t show_dawn_dusk;
   uint8_t show_golden_hour;
   uint8_t show_darkness;
+  int time_format;       /* 0=24h, 1=12h */
+  int date_format;       /* 0=DD.MM., 1=MM/DD */
 } AppSettings;
 
-#define SETTINGS_VERSION 2
+#define SETTINGS_VERSION 3
 
 static AppSettings s_settings = {
   .version = SETTINGS_VERSION,
@@ -33,6 +35,7 @@ static AppSettings s_settings = {
   .show_cloud = 1, .show_precip = 1, .show_humidity = 1,
   .show_wind = 1, .show_uv = 1,
   .show_dawn_dusk = 1, .show_golden_hour = 1, .show_darkness = 1,
+  .time_format = 0, .date_format = 0,
 };
 
 static void prv_load_settings(void) {
@@ -215,6 +218,18 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
   HANDLE_TOGGLE(SHOW_GOLDEN_HOUR, show_golden_hour);
   HANDLE_TOGGLE(SHOW_DARKNESS,    show_darkness);
 #undef HANDLE_TOGGLE
+  Tuple *tf_t = dict_find(iter, MESSAGE_KEY_TIME_FORMAT);
+  if (tf_t) {
+    s_settings.time_format = (tf_t->type == TUPLE_CSTRING)
+      ? atoi(tf_t->value->cstring) : (int)tf_t->value->int32;
+    prv_save_settings(); layer_mark_dirty(s_graph_layer);
+  }
+  Tuple *df_t = dict_find(iter, MESSAGE_KEY_DATE_FORMAT);
+  if (df_t) {
+    s_settings.date_format = (df_t->type == TUPLE_CSTRING)
+      ? atoi(df_t->value->cstring) : (int)df_t->value->int32;
+    prv_save_settings(); layer_mark_dirty(s_graph_layer);
+  }
 
   /* UV index may arrive as a separate follow-up message (no STATUS) */
   Tuple *uv_followup_t = dict_find(iter, MESSAGE_KEY_UV_INDEX);
@@ -351,6 +366,45 @@ static const char *prv_compass(uint8_t dir_byte) {
   static const char *dirs[] = {"N","NE","E","SE","S","SW","W","NW"};
   int deg = (int)dir_byte * 360 / 254;
   return dirs[((deg + 22) / 45) % 8];
+}
+
+/* Format hour for x-axis label: "14" (24h) or "2p" (12h) */
+static void prv_fmt_hour(char *buf, int sz, int h24) {
+  if (s_settings.time_format == 0) {
+    snprintf(buf, sz, "%02d", h24);
+  } else {
+    int h12 = h24 % 12; if (h12 == 0) h12 = 12;
+    snprintf(buf, sz, "%d%c", h12, h24 < 12 ? 'a' : 'p');
+  }
+}
+
+/* Format HH:MM for popup: "17:06" (24h) or "5:06p" (12h) */
+static void prv_fmt_hhmm(char *buf, int sz, int h24, int min) {
+  if (s_settings.time_format == 0) {
+    snprintf(buf, sz, "%02d:%02d", h24, min);
+  } else {
+    int h12 = h24 % 12; if (h12 == 0) h12 = 12;
+    snprintf(buf, sz, "%d:%02d%c", h12, min, h24 < 12 ? 'a' : 'p');
+  }
+}
+
+/* Format date: "5.6." (DD.MM.) or "6/5" (MM/DD) */
+static void prv_fmt_date(char *buf, int sz, int dd, int mm) {
+  if (s_settings.date_format == 0) {
+    snprintf(buf, sz, "%d.%d.", dd, mm);
+  } else {
+    snprintf(buf, sz, "%d/%d", mm, dd);
+  }
+}
+
+/* Format popup header hour: "Mon 14:00" (24h) or "Mon 2PM" (12h) */
+static void prv_fmt_hdr(char *buf, int sz, const char *day, int h24) {
+  if (s_settings.time_format == 0) {
+    snprintf(buf, sz, "%s %02d:00", day, h24);
+  } else {
+    int h12 = h24 % 12; if (h12 == 0) h12 = 12;
+    snprintf(buf, sz, "%s %d%s", day, h12, h24 < 12 ? "am" : "pm");
+  }
 }
 
 static void prv_touch_handler(const TouchEvent *event, void *ctx) {
@@ -933,7 +987,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
       int idx = (th - view_start_h + 24) % 24;
       if (idx >= n) continue;
       int tx = X(idx);
-      char lbl[4]; snprintf(lbl, sizeof(lbl), "%02d", th);
+      char lbl[5]; prv_fmt_hour(lbl, sizeof(lbl), th);
       graphics_draw_text(ctx, lbl, f_small,
                          GRect(tx + 4, gb - 3, 30, TLABEL_HEIGHT - 1),
                          GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
@@ -947,7 +1001,8 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
         int mm = s_local_start_mon;
         while (dd > days_in_month[mm]) { dd -= days_in_month[mm]; mm++; if (mm > 12) mm = 1; }
         char day_lbl[16];
-        snprintf(day_lbl, sizeof(day_lbl), "%s %d.%d.", day_names[weekday], dd, mm);
+        char date_part[8]; prv_fmt_date(date_part, sizeof(date_part), dd, mm);
+        snprintf(day_lbl, sizeof(day_lbl), "%s %s", day_names[weekday], date_part);
         if (!s_animating) {
           graphics_context_set_text_color(ctx, GColorWhite);
           graphics_draw_text(ctx, day_lbl, f_small,
@@ -979,7 +1034,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
       int dd = s_local_start_day + day_num;
       int mm = s_local_start_mon;
       while (dd > dim[mm]) { dd -= dim[mm]; mm++; if (mm > 12) mm = 1; }
-      char date_lbl[8]; snprintf(date_lbl, sizeof(date_lbl), "%d.%d.", dd, mm);
+      char date_lbl[8]; prv_fmt_date(date_lbl, sizeof(date_lbl), dd, mm);
       /* Weekday on top row, date on bottom row — with white shadow */
       if (!s_animating) {
         graphics_context_set_text_color(ctx, GColorWhite);
@@ -1133,7 +1188,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
       int ah  = s_local_start_h + abs_i;
       int wd  = (s_local_start_wday + ah / 24) % 7;
       int hod = ah % 24;
-      char hdr[12]; snprintf(hdr, sizeof(hdr), "%s %02d:00", pday[wd], hod);
+      char hdr[12]; prv_fmt_hdr(hdr, sizeof(hdr), pday[wd], hod);
       graphics_context_set_text_color(ctx, GColorBlack);
       graphics_draw_text(ctx, hdr, fp,
         GRect(px + 3, hdr_y, popup_w - 6, row_h),
@@ -1247,14 +1302,14 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
         } else {
           sh = (s_local_start_h + r0) % 24;
         }
-        char tstart[6]; snprintf(tstart, sizeof(tstart), "%02d:%02d", sh, sm);
+        char tstart[8]; prv_fmt_hhmm(tstart, sizeof(tstart), sh, sm);
         PROW(tstart, "gold>", GColorOrange);
       }
       if (sc >= 100) {
         int tick_min = (sc < 160) ? (sc - 100) : (sc - 160);
         bool is_rise = (sc < 160);
         int tick_h   = (s_local_start_h + abs_i) % 24;
-        char tval[6]; snprintf(tval, sizeof(tval), "%02d:%02d", tick_h, tick_min);
+        char tval[8]; prv_fmt_hhmm(tval, sizeof(tval), tick_h, tick_min);
         PROW(tval, is_rise ? "rise" : "set", GColorOrange);
       }
       if (base == 1) {
@@ -1264,7 +1319,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
         } else {
           eh = (s_local_start_h + r1 + 1) % 24;
         }
-        char tend[6]; snprintf(tend, sizeof(tend), "%02d:%02d", eh, em);
+        char tend[8]; prv_fmt_hhmm(tend, sizeof(tend), eh, em);
         PROW(tend, "<gold", GColorOrange);
       }
       /* Darkness: show start and end on separate rows */
@@ -1285,8 +1340,8 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
         } else {
           eh = (s_local_start_h + r1 + 1) % 24;
         }
-        char tstart[6]; snprintf(tstart, sizeof(tstart), "%02d:%02d", sh, sm);
-        char tend[6];   snprintf(tend,   sizeof(tend),   "%02d:%02d", eh, em);
+        char tstart[8]; prv_fmt_hhmm(tstart, sizeof(tstart), sh, sm);
+        char tend[8];   prv_fmt_hhmm(tend,   sizeof(tend),   eh, em);
         PROW(tstart, "dark>", GColorDarkGray);
         PROW(tend,   "<dark", GColorDarkGray);
       }
@@ -1327,12 +1382,17 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
   {
     time_t now_t = time(NULL);
     struct tm *lt = localtime(&now_t);
-    char tstr[6];
-    strftime(tstr, sizeof(tstr), "%H:%M", lt);
+    char tstr[8];
+    if (s_settings.time_format == 0) {
+      strftime(tstr, sizeof(tstr), "%H:%M", lt);
+    } else {
+      int h12 = lt->tm_hour % 12; if (h12 == 0) h12 = 12;
+      snprintf(tstr, sizeof(tstr), "%d:%02d%s", h12, lt->tm_min, lt->tm_hour < 12 ? "am" : "pm");
+    }
     graphics_context_set_text_color(ctx, GColorBlack);
     graphics_draw_text(ctx, tstr, f_small,
-                       GRect(w - 40, -1, 38, 14),
-                       GTextOverflowModeWordWrap, GTextAlignmentRight, NULL);
+                       GRect(w - 48, -1, 46, 14),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
   }
 }
 

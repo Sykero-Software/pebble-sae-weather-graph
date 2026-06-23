@@ -54,7 +54,9 @@
       "SHOW_UV",
       "SHOW_DAWN_DUSK",
       "SHOW_GOLDEN_HOUR",
-      "SHOW_DARKNESS"
+      "SHOW_DARKNESS",
+      "TIME_FORMAT",
+      "DATE_FORMAT"
     ],
     "resources": {
       "media": []

@@ -87,6 +87,30 @@ module.exports = [
     "defaultValue": true
   },
   {
+    "type": "heading",
+    "defaultValue": "Formats"
+  },
+  {
+    "type": "select",
+    "messageKey": "TIME_FORMAT",
+    "defaultValue": 0,
+    "label": "Time format",
+    "options": [
+      { "label": "24h", "value": 0 },
+      { "label": "12h (AM/PM)", "value": 1 }
+    ]
+  },
+  {
+    "type": "select",
+    "messageKey": "DATE_FORMAT",
+    "defaultValue": 0,
+    "label": "Date format",
+    "options": [
+      { "label": "DD.MM.", "value": 0 },
+      { "label": "MM/DD", "value": 1 }
+    ]
+  },
+  {
     "type": "submit",
     "defaultValue": "Save"
   }
