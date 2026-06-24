@@ -9,8 +9,8 @@ module.exports = [
     "defaultValue": 0,
     "label": "Temperature",
     "options": [
-      { "label": "Celsius (°C)", "value": 0 },
-      { "label": "Fahrenheit (°F)", "value": 1 }
+      { "label": "°C", "value": 0 },
+      { "label": "°F", "value": 1 }
     ]
   },
   {
