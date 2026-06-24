@@ -23,7 +23,9 @@
     "watchapp": {
       "watchface": false
     },
-    "capabilities": ["configurable"],
+    "capabilities": [
+      "configurable"
+    ],
     "messageKeys": [
       "REQUEST_DATA",
       "STATUS",
@@ -76,7 +78,14 @@
       "SELECTED_PRESET"
     ],
     "resources": {
-      "media": []
+      "media": [
+        {
+          "type": "bitmap",
+          "name": "LAUNCHER_ICON",
+          "file": "launcher_icon.png",
+          "menuIcon": true
+        }
+      ]
     }
   }
 }

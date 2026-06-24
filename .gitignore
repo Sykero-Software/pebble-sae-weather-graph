@@ -4,3 +4,4 @@ build
 .lock-waf_darwin_build
 node_modules
 screenshots/raw_png
+resources/launcher_icon_preview.png

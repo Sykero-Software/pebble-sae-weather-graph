@@ -46,3 +46,8 @@ clean:
 .PHONY: screenshots
 screenshots:
 	bash scripts/create_screenshots.sh
+
+# Generate app icon (resources/launcher_icon.png)
+.PHONY: icon
+icon:
+	python3 scripts/generate_icon.py
