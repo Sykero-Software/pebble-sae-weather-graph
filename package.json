@@ -4,8 +4,6 @@
   "version": "1.0.0",
   "keywords": [
     "weather",
-    "fmi",
-    "finland",
     "graph"
   ],
   "private": true,
