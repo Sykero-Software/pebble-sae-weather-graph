@@ -41,3 +41,8 @@ install_cloudpebble:
 .PHONY: clean
 clean:
 	pebble clean
+
+# Take screenshots and generate GIFs for the app store page
+.PHONY: screenshots
+screenshots:
+	bash scripts/create_screenshots.sh
