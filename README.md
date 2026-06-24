@@ -1,6 +1,6 @@
 # pebble-fmi-graph
 
-A Pebble watchapp/watchface written in C using the Pebble SDK.
+A Pebble watchapp written in C using the Pebble SDK.
 
 ## Building & running
 
@@ -29,9 +29,6 @@ resources/       Images, fonts, and other bundled resources
 package.json     Project metadata (UUID, platforms, resources, message keys)
 wscript          Build rules — usually no need to edit
 ```
-
-By default this project is configured as a watchapp. To make it a watchface,
-set `pebble.watchapp.watchface` to `true` in `package.json`.
 
 ## Documentation
 

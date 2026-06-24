@@ -6,45 +6,12 @@ alwaysApply: true
 
 This is a Pebble smartwatch application written in C using the Pebble SDK.
 
-## Supported Platforms
-
-The app targets multiple Pebble watch models:
-- aplite (Pebble classic)
-- basalt (Pebble Time)
-- chalk (Pebble Time Round)
-- diorite (Pebble 2)
-- emery (Pebble Time 2)
-- flint (Pebble 2 Duo)
+Emery (Time 2) is the only supported platform.
 
 ## Commands
 
-```bash
-# Build the app for all platforms
-pebble build
-
-# Clean build artifacts
-pebble clean
-
-# Install the app on specific emulator
-pebble install --emulator basalt
-
-# Screenshot the running emulator
-pebble screenshot --scale 6 --no-open screenshot.png
-```
-
-If you need more information on the `pebble` command or a sub-command, append `--help`.
-
-### Headless Environments
-
-If you're running in an environment without a window server (e.g., headless Linux, Docker, CI), you must add `--vnc` to **all commands that interact with the emulator**. This includes app installs, screenshots, button presses, and any `emu-*` commands:
-
-```bash
-pebble install --emulator basalt --vnc
-pebble screenshot --vnc --scale 6 --no-open screenshot.png
-pebble emu-button --emulator basalt --vnc click select
-```
-
-The `--vnc` flag enables a VNC-based display backend that doesn't require X11.
+See README.md. In short, use Makefile rules. Use the `pebble` CLI to run more
+specific commands, such as controlling the emulator or taking screenshots.
 
 ## Project Structure
 
@@ -54,16 +21,13 @@ src/pkjs/        - PebbleKitJS files (currently empty)
 worker_src/c/    - Worker source files (optional, not present)
 resources/       - Images, fonts, and other resources (not present)
 ```
-## Configuration
-
-By default, this project is initialized as a watchface. To make it an app, replace "watchface": true with "watchface": false in package.json.
 
 ## Architecture
 
 The application follows the standard Pebble app architecture:
 
 1. **Main Entry Point**: `src/c` - The `main()` function initializes the app and starts the event loop
-2. **Window Management**: Single window app with text layer for displaying button press feedback
+2. **Window Management**: Multi-window app.
 3. **Event Handling**: Button click handlers registered via `prv_click_config_provider` for UP, DOWN, and SELECT buttons
 
 ## SDK Documentation
@@ -126,10 +90,6 @@ pebble emu-button click up --repeat 3 --interval 100
 - Use `click --duration 2000` for long press (e.g., back button to exit)
 - Use `--repeat` to scroll through menus instead of multiple commands
 - After making UI changes, take a screenshot to verify the result
-
-## AI Interaction Guidelines
-
-- When given an image of a watchface to replicate, describe the target watchface in precise detail. Note every visual element present, as well as size, alignment, font weight, spacing, and location.
 
 ## AI Code Review Guidelines
 
