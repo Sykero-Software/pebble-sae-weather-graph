@@ -25,6 +25,8 @@ typedef struct {
   uint8_t show_wind_z5;
   uint8_t show_uv_z1;
   uint8_t show_uv_z5;
+  uint8_t show_weather_ind_z1;
+  uint8_t show_weather_ind_z5;
   uint8_t show_sunrise_sunset_z1;
   uint8_t show_sunrise_sunset_z5;
   uint8_t show_golden_hour_z1;
@@ -35,7 +37,7 @@ typedef struct {
   int date_format;       /* 0=DD.MM., 1=MM/DD */
 } AppSettings;
 
-#define SETTINGS_VERSION 4
+#define SETTINGS_VERSION 5
 
 static AppSettings s_settings = {
   .version = SETTINGS_VERSION,
@@ -45,6 +47,7 @@ static AppSettings s_settings = {
   .show_humidity_z1 = 1, .show_humidity_z5 = 1,
   .show_wind_z1 = 1, .show_wind_z5 = 1,
   .show_uv_z1 = 1, .show_uv_z5 = 1,
+  .show_weather_ind_z1 = 1, .show_weather_ind_z5 = 1,
   .show_sunrise_sunset_z1 = 1, .show_sunrise_sunset_z5 = 1,
   .show_golden_hour_z1 = 1, .show_golden_hour_z5 = 1,
   .show_darkness_z1 = 1, .show_darkness_z5 = 1,
@@ -77,6 +80,8 @@ static uint8_t    s_precip[MAX_TEMPS];
 static uint8_t    s_wind_speed[MAX_TEMPS];  /* whole m/s, 255=NaN */
 static uint8_t    s_wind_dir[MAX_TEMPS];    /* dir/360*254, 255=NaN */
 static uint8_t    s_wind_gust[MAX_TEMPS];   /* whole m/s, 255=NaN */
+static uint8_t    s_weather_ind[MAX_TEMPS]; /* 0=none, 1=snow/sleet, 2=lightning */
+static int        s_weather_ind_count  = 0;
 static uint8_t    s_cloud[MAX_TEMPS];       /* 0-100%, 255=NaN */
 static uint8_t    s_sun_cond[MAX_TEMPS];    /* 0=normal, 1=golden, 2=dark */
 static uint8_t    s_sun_bmin[MAX_TEMPS];    /* boundary minute encoding */
@@ -229,6 +234,8 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
   HANDLE_TOGGLE(SHOW_CLOUD_Z5,        show_cloud_z5);
   HANDLE_TOGGLE(SHOW_PRECIP_Z1,       show_precip_z1);
   HANDLE_TOGGLE(SHOW_PRECIP_Z5,       show_precip_z5);
+  HANDLE_TOGGLE(SHOW_WEATHER_IND_Z1,  show_weather_ind_z1);
+  HANDLE_TOGGLE(SHOW_WEATHER_IND_Z5,  show_weather_ind_z5);
   HANDLE_TOGGLE(SHOW_HUMIDITY_Z1,     show_humidity_z1);
   HANDLE_TOGGLE(SHOW_HUMIDITY_Z5,     show_humidity_z5);
   HANDLE_TOGGLE(SHOW_WIND_Z1,         show_wind_z1);
@@ -286,6 +293,7 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
 
   if (s_status == STATUS_READY) {
     /* Reset optional component counts; only set if keys are present in message */
+    s_weather_ind_count = 0;
     s_wind_count = 0;
     s_wind_gust_count = 0;
     s_cloud_count = 0;
@@ -360,6 +368,13 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
       s_humidity_count = n;
       const uint8_t *raw = (const uint8_t *)hum_t->value->data;
       for (int i = 0; i < n; i++) s_humidity[i] = raw[i];
+    }
+    Tuple *wind_t = dict_find(iter, MESSAGE_KEY_WEATHER_INDICATOR);
+    if (wind_t && wind_t->type == TUPLE_BYTE_ARRAY) {
+      int n = (int)wind_t->length < MAX_TEMPS ? (int)wind_t->length : MAX_TEMPS;
+      s_weather_ind_count = n;
+      const uint8_t *raw = (const uint8_t *)wind_t->value->data;
+      for (int i = 0; i < n; i++) s_weather_ind[i] = raw[i];
     }
     Tuple *wgust_t = dict_find(iter, MESSAGE_KEY_WIND_GUST);
     if (wgust_t && wgust_t->type == TUPLE_BYTE_ARRAY) {
@@ -705,6 +720,80 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
         int bw = X(i + 1) - bx;
         if (bw < 1) bw = 1;
         graphics_fill_rect(ctx, GRect(bx, precip_top, bw, bh), 0, GCornerNone);
+      }
+    }
+  }
+
+  /* ---- weather indicators (snow/sleet and lightning) ---- */
+  if (SHOW(weather_ind) && s_weather_ind_count > 0) {
+    int icon_r = 5;  /* half-size for overlap detection */
+    int last_icon_right = -999;
+    int run_start = -1;
+    int run_type  = 0;
+
+    for (int i = 0; i <= n; i++) {
+      int abs_i = view_start + i;
+      int ind = (i < n && abs_i < s_weather_ind_count) ? (int)s_weather_ind[abs_i] : 0;
+
+      /* Flush completed run */
+      if (run_type > 0 && (ind != run_type || i == n)) {
+        int run_end = i;  /* exclusive */
+        int cx = (X(run_start) + X(run_end)) / 2;
+
+        /* Max precip bar height in run → y position */
+        int max_bh = 0;
+        if (SHOW(precip) && s_precip_count > 0 && precip_max_p > 0) {
+          for (int j = run_start; j < run_end; j++) {
+            int aj = view_start + j;
+            if (aj < s_precip_count) {
+              int bh = (int)s_precip[aj] * precip_max_bar_h / precip_max_p;
+              if (bh > max_bh) max_bh = bh;
+            }
+          }
+        }
+        int iy = (SHOW(precip) && s_precip_count > 0)
+                 ? (precip_top + max_bh + icon_r + 2)
+                 : (gt + icon_r + 2);
+
+        if (iy + icon_r <= gb && cx - icon_r > last_icon_right) {
+          GColor ind_color = (run_type == 2)
+            ? PBL_IF_COLOR_ELSE(GColorOrange,          GColorWhite)
+            : PBL_IF_COLOR_ELSE(GColorVividCerulean,   GColorWhite);
+          graphics_context_set_stroke_color(ctx, ind_color);
+
+          /* Range lines, leaving a gap around the icon */
+          int lx0 = X(run_start);
+          int lx1 = X(run_end);
+          if (cx - icon_r - 2 > lx0)
+            graphics_draw_line(ctx, GPoint(lx0, iy), GPoint(cx - icon_r - 2, iy));
+          if (cx + icon_r + 2 < lx1)
+            graphics_draw_line(ctx, GPoint(cx + icon_r + 2, iy), GPoint(lx1 - 1, iy));
+
+          if (run_type == 1) {
+            /* Snowflake: 4 crossed lines (horizontal, vertical, two diagonals) */
+            int a = 4;
+            graphics_draw_line(ctx, GPoint(cx - a, iy),     GPoint(cx + a, iy));
+            graphics_draw_line(ctx, GPoint(cx, iy - a),     GPoint(cx, iy + a));
+            graphics_draw_line(ctx, GPoint(cx - a + 1, iy - a + 1), GPoint(cx + a - 1, iy + a - 1));
+            graphics_draw_line(ctx, GPoint(cx + a - 1, iy - a + 1), GPoint(cx - a + 1, iy + a - 1));
+          } else if (run_type == 2) {
+            /* Lightning bolt: Z-shaped zigzag */
+            graphics_draw_line(ctx, GPoint(cx + 1, iy - 4), GPoint(cx - 2, iy));
+            graphics_draw_line(ctx, GPoint(cx - 2, iy),     GPoint(cx + 2, iy));
+            graphics_draw_line(ctx, GPoint(cx + 2, iy),     GPoint(cx - 1, iy + 4));
+          }
+
+          last_icon_right = cx + icon_r;
+        }
+
+        run_start = -1;
+        run_type  = 0;
+      }
+
+      /* Start new run */
+      if (i < n && ind > 0 && run_type == 0) {
+        run_start = i;
+        run_type  = ind;
       }
     }
   }

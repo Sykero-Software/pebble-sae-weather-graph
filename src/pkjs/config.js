@@ -84,6 +84,18 @@ module.exports = [
   },
   {
     "type": "toggle",
+    "messageKey": "SHOW_WEATHER_IND_Z1",
+    "label": "Snow & lightning indicators (1 day)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
+    "messageKey": "SHOW_WEATHER_IND_Z5",
+    "label": "Snow & lightning indicators (5 days)",
+    "defaultValue": true
+  },
+  {
+    "type": "toggle",
     "messageKey": "SHOW_HUMIDITY_Z1",
     "label": "Relative humidity (1 day)",
     "defaultValue": true

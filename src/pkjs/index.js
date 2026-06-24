@@ -32,6 +32,7 @@ var clay = new Clay(clayConfig, function() {
     var pairs = [
       ['SHOW_CLOUD_Z1',        'SHOW_CLOUD_Z5',        'Cloud cover'],
       ['SHOW_PRECIP_Z1',       'SHOW_PRECIP_Z5',       'Precipitation'],
+      ['SHOW_WEATHER_IND_Z1',  'SHOW_WEATHER_IND_Z5',  'Snow & lightning'],
       ['SHOW_HUMIDITY_Z1',     'SHOW_HUMIDITY_Z5',     'Relative humidity'],
       ['SHOW_WIND_Z1',         'SHOW_WIND_Z5',         'Wind'],
       ['SHOW_UV_Z1',           'SHOW_UV_Z5',           'UV index'],
@@ -160,6 +161,7 @@ var clay = new Clay(clayConfig, function() {
 
 var MAX_TEMPS = 240;
 var DEBUG_FORCE_OPENMETEO = false;  /* set true to always use Open-Meteo endpoint */
+var DEBUG_WEATHER_IND = false;      /* set true to inject fake snow & lightning ranges */
 var DEBUG_COORDS = null;  /* set to an object to use test coordinates */
 // var DEBUG_COORDS = { lat: 48.0941, lon: 7.9604, name: 'Waldkirch' };  /* Germany */
 // var DEBUG_COORDS = { lat: 62.2426, lon: 25.7473, name: 'Jyvaskyla' };  /* Jyväskylä center */
@@ -167,7 +169,7 @@ var DEBUG_COORDS = null;  /* set to an object to use test coordinates */
 var FMI_WFS_BASE = 'https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0' +
   '&request=getFeature' +
   '&storedquery_id=fmi::forecast::edited::weather::scandinavia::point::timevaluepair' +
-  '&parameters=Temperature,Precipitation1h,WindSpeedMS,WindDirection,HourlyMaximumGust,TotalCloudCover,Humidity&timestep=60';
+  '&parameters=Temperature,Precipitation1h,WindSpeedMS,WindDirection,HourlyMaximumGust,TotalCloudCover,Humidity,WeatherSymbol3&timestep=60';
 
 var pendingFetch = false;
 
@@ -201,6 +203,19 @@ function solarElevationDeg(latDeg, lonDeg, date) {
 function elToSunCond(el) {
   if (el < -18) return 2;
   if (el >= -4 && el <= 6) return 1;
+  return 0;
+}
+
+/* Maps WMO weather code to indicator byte: 0=none, 1=snow/sleet, 2=lightning */
+function weatherCodeToIndicator(code) {
+  if (code === null || code === undefined || isNaN(code)) return 0;
+  code = Math.round(code);
+  if (code >= 95) return 2;  /* thunderstorm — lightning takes priority */
+  if ((code >= 56 && code <= 57) ||  /* freezing drizzle */
+      (code >= 66 && code <= 67) ||  /* freezing rain */
+      (code >= 70 && code <= 79) ||  /* snow */
+      (code >= 85 && code <= 86))    /* snow showers */
+    return 1;
   return 0;
 }
 
@@ -425,7 +440,7 @@ function fetchOpenMeteo(lat, lon, fallbackName) {
   var url = 'https://api.open-meteo.com/v1/forecast' +
     '?latitude=' + lat.toFixed(4) +
     '&longitude=' + lon.toFixed(4) +
-    '&hourly=temperature_2m,precipitation,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cloud_cover,uv_index,relative_humidity_2m' +
+    '&hourly=temperature_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cloud_cover,uv_index,relative_humidity_2m' +
     '&wind_speed_unit=ms' +
     '&timeformat=unixtime' +
     '&forecast_days=9' +
@@ -502,6 +517,7 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
   var times    = h.time;
   var tempRaw  = h.temperature_2m;
   var precipRaw = h.precipitation;
+  var wcodeRaw = h.weather_code;
   var wspdRaw  = h.wind_speed_10m;
   var wdirRaw  = h.wind_direction_10m;
   var wgustRaw = h.wind_gusts_10m;
@@ -520,7 +536,7 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
   if (count < 1) { console.log('Open-Meteo: no usable data'); sendStatus(2); return; }
 
   var temperatures = [];
-  var precipByteArray = [], wspdByteArray = [], wdirByteArray = [], wgustByteArray = [], cloudByteArray = [], uvByteArray = [], humByteArrayOM = [];
+  var precipByteArray = [], wcodeByteArray = [], wspdByteArray = [], wdirByteArray = [], wgustByteArray = [], cloudByteArray = [], uvByteArray = [], humByteArrayOM = [];
 
   for (var i = 0; i < count; i++) {
     var idx = startIdx + i;
@@ -530,6 +546,8 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
 
     var p = (precipRaw[idx] !== null && !isNaN(precipRaw[idx])) ? precipRaw[idx] : 0;
     precipByteArray.push(Math.min(255, Math.ceil(Math.max(0, p) * 10)));
+
+    wcodeByteArray.push(weatherCodeToIndicator(wcodeRaw ? wcodeRaw[idx] : null));
 
     var s = wspdRaw[idx];
     wspdByteArray.push((s === null || isNaN(s)) ? 255 : Math.min(254, Math.round(s)));
@@ -601,6 +619,9 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName) {
   if (nonNaNUV > 0)    { msg.UV_INDEX       = uvByteArray; }
   var nonNaNHumOM = humByteArrayOM.filter(function(v) { return v !== 255; }).length;
   if (nonNaNHumOM > 0) { msg.RELATIVE_HUMIDITY = humByteArrayOM; }
+  var nonZeroInd = wcodeByteArray.filter(function(v) { return v > 0; }).length;
+  if (DEBUG_WEATHER_IND) debugInjectWeatherInd(precipByteArray, wcodeByteArray);
+  if (nonZeroInd > 0 || DEBUG_WEATHER_IND)  { msg.WEATHER_INDICATOR = wcodeByteArray; }
 
   Pebble.sendAppMessage(
     msg,
@@ -634,6 +655,7 @@ function parseAndSend(xml, startTime, lat, lon, fallbackName) {
   var wgustRaw  = extractSeries(xml, 'HourlyMaximumGust');
   var cloudRaw  = extractSeries(xml, 'TotalCloudCover');
   var humRaw    = extractSeries(xml, 'Humidity');
+  var wcodeRaw  = extractSeries(xml, 'WeatherSymbol3');
 
   // Truncate temperatures at first NaN
   var temperatures = [];
@@ -695,6 +717,12 @@ function parseAndSend(xml, startTime, lat, lon, fallbackName) {
     humByteArray.push(isNaN(h) ? 255 : Math.min(100, Math.max(0, Math.round(h))));
   }
 
+  // Weather indicator: 0=none, 1=snow/sleet, 2=lightning
+  var weatherIndArray = [];
+  for (var i = 0; i < temperatures.length; i++) {
+    weatherIndArray.push(weatherCodeToIndicator(i < wcodeRaw.length ? wcodeRaw[i] : null));
+  }
+
   // Sun condition: 0=normal, 1=golden, 2=dark; 100+min=sunrise golden, 160+min=sunset golden
   var sunByteArray = [];
   var sunBminArray = [];
@@ -753,6 +781,9 @@ function parseAndSend(xml, startTime, lat, lon, fallbackName) {
   msg.SUN_BOUNDARY_MIN = sunBminArray;
   var nonNaNHum = humByteArray.filter(function(v) { return v !== 255; }).length;
   if (nonNaNHum > 0)   { msg.RELATIVE_HUMIDITY = humByteArray; }
+  var nonZeroInd = weatherIndArray.filter(function(v) { return v > 0; }).length;
+  if (DEBUG_WEATHER_IND) debugInjectWeatherInd(precipByteArray, weatherIndArray);
+  if (nonZeroInd > 0 || DEBUG_WEATHER_IND) { msg.WEATHER_INDICATOR = weatherIndArray; }
 
   Pebble.sendAppMessage(
     msg,
@@ -773,6 +804,38 @@ function parseAndSend(xml, startTime, lat, lon, fallbackName) {
 
 function sendStatus(status) {
   Pebble.sendAppMessage({ STATUS: status });
+}
+
+/* Injects fake snow (ind=1) and lightning (ind=2) ranges for testing.
+   Prefers hours with non-zero precipitation; falls back to fixed offsets. */
+function debugInjectWeatherInd(precipArr, indArr) {
+  /* Find up to 2 rain runs */
+  var runs = [];
+  var inRun = false;
+  for (var i = 0; i < precipArr.length && runs.length < 2; i++) {
+    if (precipArr[i] > 0 && !inRun) { runs.push({ start: i }); inRun = true; }
+    else if (precipArr[i] === 0 && inRun) { runs[runs.length - 1].end = i; inRun = false; }
+  }
+  if (inRun) runs[runs.length - 1].end = precipArr.length;
+
+  /* Fill any missing runs with fixed offsets */
+  var base = Math.min(24, Math.floor(indArr.length / 3));
+  if (!runs[0]) runs[0] = { start: base,     end: base + 4 };
+  if (!runs[1]) runs[1] = { start: base + 6, end: base + 9 };
+
+  /* Clamp to array length */
+  for (var j = 0; j < runs.length; j++) {
+    runs[j].start = Math.min(runs[j].start, indArr.length - 1);
+    runs[j].end   = Math.min(runs[j].end,   indArr.length);
+  }
+
+  /* Inject: first run → snow (1), second run → lightning (2) */
+  for (var k = runs[0].start; k < runs[0].end; k++) indArr[k] = 1;
+  for (var k = runs[1].start; k < runs[1].end; k++) indArr[k] = 2;
+
+  console.log('DEBUG_WEATHER_IND: snow=' + runs[0].start + '-' + runs[0].end +
+              ', lightning=' + runs[1].start + '-' + runs[1].end);
+  return indArr;
 }
 
 function toIsoString(date) {
