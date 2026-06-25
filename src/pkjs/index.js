@@ -192,45 +192,6 @@ var FMI_WFS_BASE = 'https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0' +
 
 var pendingFetch = false;
 
-/* ---------- phone-side forecast cache ---------- */
-
-function getCacheMaxAgeMs() {
-  try {
-    var settings = JSON.parse(localStorage.getItem('clay-settings')) || {};
-    var h = parseFloat(settings.CACHE_MAX_AGE_HOURS);
-    if (!isNaN(h) && h >= 0) return h * 3600000;
-  } catch(e) {}
-  return 24 * 3600000;  /* default 24 h */
-}
-
-function getCacheKey(presetIndex) {
-  return 'forecast_cache_' + (presetIndex || 0);
-}
-
-function saveToCache(presetIndex, msg) {
-  try {
-    var entry = JSON.stringify({ timestamp: Date.now(), msg: msg });
-    localStorage.setItem(getCacheKey(presetIndex), entry);
-  } catch(e) {
-    console.log('Cache save error: ' + e);
-  }
-}
-
-function loadFromCache(presetIndex) {
-  try {
-    var raw = localStorage.getItem(getCacheKey(presetIndex));
-    if (!raw) return null;
-    var entry = JSON.parse(raw);
-    if (!entry || !entry.msg || typeof entry.timestamp !== 'number') return null;
-    if (Date.now() - entry.timestamp > getCacheMaxAgeMs()) return null;
-    return entry.msg;
-  } catch(e) {
-    return null;
-  }
-}
-
-/* -------------------------------------------- */
-
 function solarElevationDeg(latDeg, lonDeg, date) {
   var JD = date.getTime() / 86400000.0 + 2440587.5;
   var T = (JD - 2451545.0) / 36525.0;
@@ -413,16 +374,6 @@ function fetchForecast(presetIndex) {
   if (pendingFetch) return;
   pendingFetch = true;
   presetIndex = presetIndex || 0;
-
-  /* Send cached data immediately if available */
-  var cached = loadFromCache(presetIndex);
-  if (cached) {
-    console.log('Sending cached forecast for slot ' + presetIndex);
-    Pebble.sendAppMessage(cached,
-      function() { console.log('Cached data sent OK'); },
-      function(e) { console.log('Cached data send error: ' + JSON.stringify(e)); }
-    );
-  }
 
   if (DEBUG_COORDS) {
     if (DEBUG_FORCE_OPENMETEO) {
@@ -691,8 +642,6 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName, presetIndex) {
   if (DEBUG_WEATHER_IND) debugInjectWeatherInd(precipByteArray, wcodeByteArray);
   if (nonZeroInd > 0 || DEBUG_WEATHER_IND)  { msg.WEATHER_INDICATOR = wcodeByteArray; }
 
-  saveToCache(presetIndex, msg);
-
   Pebble.sendAppMessage(
     msg,
     function () { console.log('Open-Meteo data sent OK'); },
@@ -854,8 +803,6 @@ function parseAndSend(xml, startTime, lat, lon, fallbackName, presetIndex) {
   var nonZeroInd = weatherIndArray.filter(function(v) { return v > 0; }).length;
   if (DEBUG_WEATHER_IND) debugInjectWeatherInd(precipByteArray, weatherIndArray);
   if (nonZeroInd > 0 || DEBUG_WEATHER_IND) { msg.WEATHER_INDICATOR = weatherIndArray; }
-
-  saveToCache(presetIndex, msg);
 
   Pebble.sendAppMessage(
     msg,

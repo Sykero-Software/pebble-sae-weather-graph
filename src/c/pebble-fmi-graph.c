@@ -35,9 +35,10 @@ typedef struct {
   uint8_t show_darkness_z5;
   int time_format;       /* 0=24h, 1=12h */
   int date_format;       /* 0=DD.MM., 1=MM/DD */
+  float cache_max_age_hours; /* hours before cached forecast is stale */
 } AppSettings;
 
-#define SETTINGS_VERSION 5
+#define SETTINGS_VERSION 6
 
 static AppSettings s_settings = {
   .version = SETTINGS_VERSION,
@@ -52,6 +53,7 @@ static AppSettings s_settings = {
   .show_golden_hour_z1 = 0, .show_golden_hour_z5 = 0,
   .show_darkness_z1 = 0, .show_darkness_z5 = 0,
   .time_format = 0, .date_format = 0,
+  .cache_max_age_hours = 24.0f,
 };
 
 static void prv_load_settings(void) {
@@ -174,10 +176,105 @@ static void prv_compute_daily_stats(void) {
   }
 }
 
+/* ---------- forecast cache (persisted per preset slot) ---------- */
+
+#define CACHE_KEY_BASE      10
+#define CACHE_KEYS_PER_SLOT 12
+#define NUM_CACHE_SLOTS     6   /* 0=GPS, 1-5=presets */
+
+typedef struct __attribute__((packed)) {
+  uint32_t timestamp;
+  int16_t  temp_count, precip_count, wind_count, wind_gust_count;
+  int16_t  cloud_count, sun_count, sun_bmin_count;
+  int16_t  uv_count, humidity_count, weather_ind_count;
+  int8_t   local_start_h, local_start_wday, local_start_day, local_start_mon;
+  int16_t  current_idx;
+  uint8_t  current_min;
+  char     location[33];
+} CacheMetadata; /* ~65 bytes */
+
+static void prv_save_cache(int preset) {
+  if (preset < 0 || preset >= NUM_CACHE_SLOTS) return;
+  int base = CACHE_KEY_BASE + preset * CACHE_KEYS_PER_SLOT;
+  CacheMetadata meta = {
+    .timestamp         = (uint32_t)time(NULL),
+    .temp_count        = (int16_t)s_temp_count,
+    .precip_count      = (int16_t)s_precip_count,
+    .wind_count        = (int16_t)s_wind_count,
+    .wind_gust_count   = (int16_t)s_wind_gust_count,
+    .cloud_count       = (int16_t)s_cloud_count,
+    .sun_count         = (int16_t)s_sun_count,
+    .sun_bmin_count    = (int16_t)s_sun_bmin_count,
+    .uv_count          = (int16_t)s_uv_count,
+    .humidity_count    = (int16_t)s_humidity_count,
+    .weather_ind_count = (int16_t)s_weather_ind_count,
+    .local_start_h     = (int8_t)s_local_start_h,
+    .local_start_wday  = (int8_t)s_local_start_wday,
+    .local_start_day   = (int8_t)s_local_start_day,
+    .local_start_mon   = (int8_t)s_local_start_mon,
+    .current_idx       = (int16_t)s_current_idx,
+    .current_min       = (uint8_t)s_current_min,
+  };
+  snprintf(meta.location, sizeof(meta.location), "%s", s_location);
+  persist_write_data(base + 0,  &meta,         sizeof(meta));
+  persist_write_data(base + 1,  s_temps,       MAX_TEMPS);
+  persist_write_data(base + 2,  s_precip,      MAX_TEMPS);
+  persist_write_data(base + 3,  s_wind_speed,  MAX_TEMPS);
+  persist_write_data(base + 4,  s_wind_dir,    MAX_TEMPS);
+  persist_write_data(base + 5,  s_wind_gust,   MAX_TEMPS);
+  persist_write_data(base + 6,  s_weather_ind, MAX_TEMPS);
+  persist_write_data(base + 7,  s_cloud,       MAX_TEMPS);
+  persist_write_data(base + 8,  s_sun_cond,    MAX_TEMPS);
+  persist_write_data(base + 9,  s_sun_bmin,    MAX_TEMPS);
+  persist_write_data(base + 10, s_uv,          MAX_TEMPS);
+  persist_write_data(base + 11, s_humidity,    MAX_TEMPS);
+}
+
+static bool prv_load_cache(int preset) {
+  if (preset < 0 || preset >= NUM_CACHE_SLOTS) return false;
+  int base = CACHE_KEY_BASE + preset * CACHE_KEYS_PER_SLOT;
+  CacheMetadata meta;
+  if (persist_read_data(base + 0, &meta, sizeof(meta)) != (int)sizeof(meta)) return false;
+  time_t age = (time_t)time(NULL) - (time_t)meta.timestamp;
+  if (age < 0 || age > (time_t)(s_settings.cache_max_age_hours * 3600.0f)) return false;
+  persist_read_data(base + 1,  s_temps,       MAX_TEMPS);
+  persist_read_data(base + 2,  s_precip,      MAX_TEMPS);
+  persist_read_data(base + 3,  s_wind_speed,  MAX_TEMPS);
+  persist_read_data(base + 4,  s_wind_dir,    MAX_TEMPS);
+  persist_read_data(base + 5,  s_wind_gust,   MAX_TEMPS);
+  persist_read_data(base + 6,  s_weather_ind, MAX_TEMPS);
+  persist_read_data(base + 7,  s_cloud,       MAX_TEMPS);
+  persist_read_data(base + 8,  s_sun_cond,    MAX_TEMPS);
+  persist_read_data(base + 9,  s_sun_bmin,    MAX_TEMPS);
+  persist_read_data(base + 10, s_uv,          MAX_TEMPS);
+  persist_read_data(base + 11, s_humidity,    MAX_TEMPS);
+  s_temp_count        = meta.temp_count;
+  s_precip_count      = meta.precip_count;
+  s_wind_count        = meta.wind_count;
+  s_wind_gust_count   = meta.wind_gust_count;
+  s_cloud_count       = meta.cloud_count;
+  s_sun_count         = meta.sun_count;
+  s_sun_bmin_count    = meta.sun_bmin_count;
+  s_uv_count          = meta.uv_count;
+  s_humidity_count    = meta.humidity_count;
+  s_weather_ind_count = meta.weather_ind_count;
+  s_local_start_h     = meta.local_start_h;
+  s_local_start_wday  = meta.local_start_wday;
+  s_local_start_day   = meta.local_start_day;
+  s_local_start_mon   = meta.local_start_mon;
+  s_current_idx       = meta.current_idx;
+  s_current_min       = meta.current_min;
+  snprintf(s_location, sizeof(s_location), "%s", meta.location);
+  int initial_offset = s_current_idx - 36;
+  s_scroll_offset = (initial_offset > 0) ? initial_offset : 0;
+  s_scroll_target = s_scroll_offset;
+  prv_compute_daily_stats();
+  return true;
+}
+
 static void prv_request_data(void) {
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) != APP_MSG_OK) return;
-  dict_write_int8(iter, MESSAGE_KEY_REQUEST_DATA, 1);
   dict_write_int8(iter, MESSAGE_KEY_SELECTED_PRESET, (int8_t)s_selected_preset);
   app_message_outbox_send();
 }
@@ -261,6 +358,28 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
       ? atoi(df_t->value->cstring) : (int)df_t->value->int32;
     prv_save_settings(); layer_mark_dirty(s_graph_layer);
   }
+  Tuple *cma_t = dict_find(iter, MESSAGE_KEY_CACHE_MAX_AGE_HOURS);
+  if (cma_t) {
+    float v = -1.0f;
+    if (cma_t->type == TUPLE_CSTRING) {
+      /* Simple float parse: avoids pulling in atof/libc */
+      const char *p = cma_t->value->cstring;
+      long int_part = 0;
+      float frac = 0.0f, frac_div = 1.0f;
+      bool neg = (*p == '-');
+      if (neg || *p == '+') p++;
+      while (*p >= '0' && *p <= '9') int_part = int_part * 10 + (*p++ - '0');
+      if (*p == '.' || *p == ',') {
+        p++;
+        while (*p >= '0' && *p <= '9') { frac = frac * 10.0f + (*p++ - '0'); frac_div *= 10.0f; }
+      }
+      v = (float)int_part + frac / frac_div;
+      if (neg) v = -v;
+    } else {
+      v = (float)cma_t->value->int32;
+    }
+    if (v >= 0.0f) { s_settings.cache_max_age_hours = v; prv_save_settings(); }
+  }
 
   /* Preset location names from JS */
   {
@@ -283,6 +402,7 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
     s_uv_count = n;
     const uint8_t *raw = (const uint8_t *)uv_followup_t->value->data;
     for (int i = 0; i < n; i++) s_uv[i] = raw[i];
+    prv_save_cache(s_selected_preset);
     layer_mark_dirty(s_graph_layer);
   }
 
@@ -397,6 +517,7 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
     s_scroll_offset = (initial_offset > 0) ? initial_offset : 0;
     s_scroll_target = s_scroll_offset;
     prv_compute_daily_stats();
+    prv_save_cache(s_selected_preset);
   }
 
   prv_update_status_layer();
@@ -1826,6 +1947,12 @@ static void prv_init(void) {
     .unload = prv_window_unload,
   });
   window_stack_push(s_window, true);
+
+  if (prv_load_cache(s_selected_preset)) {
+    s_status = STATUS_READY;
+    prv_update_status_layer();
+    layer_mark_dirty(s_graph_layer);
+  }
 
   prv_request_data();
 }
