@@ -275,6 +275,7 @@ static bool prv_load_cache(int preset) {
 static void prv_request_data(void) {
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) != APP_MSG_OK) return;
+  dict_write_int8(iter, MESSAGE_KEY_REQUEST_DATA, 1);
   dict_write_int8(iter, MESSAGE_KEY_SELECTED_PRESET, (int8_t)s_selected_preset);
   app_message_outbox_send();
 }

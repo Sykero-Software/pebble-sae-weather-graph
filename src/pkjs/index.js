@@ -404,6 +404,7 @@ Pebble.addEventListener('ready', function () {
 Pebble.addEventListener('appmessage', function (e) {
   if (e.payload.REQUEST_DATA !== undefined) {
     var preset = e.payload.SELECTED_PRESET;
+    pendingFetch = false;  /* explicit watch request always overrides in-progress fetch */
     fetchForecast(typeof preset === 'number' ? preset : 0);
   }
 });
