@@ -66,7 +66,7 @@ echo "Done. Raw screenshots saved to $RAW_DIR/"
 
 echo "Copying selected screenshots..."
 cp "$RAW_DIR/000_start.png"      "$SS_DIR/screenshot_02.png"
-cp "$RAW_DIR/006_select_1_a.png" "$SS_DIR/screenshot_03.png"
+cp "$RAW_DIR/023_up_8.png" "$SS_DIR/screenshot_03.png"
 echo "Selected screenshots saved to $SS_DIR/"
 
 echo "Creating GIF 1..."
