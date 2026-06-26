@@ -264,6 +264,12 @@ static bool prv_load_cache(int preset) {
   s_local_start_mon   = meta.local_start_mon;
   s_current_idx       = meta.current_idx;
   s_current_min       = meta.current_min;
+  /* Advance the now-indicator by the time elapsed since the cache was saved */
+  time_t elapsed = (time_t)time(NULL) - (time_t)meta.timestamp;
+  if (elapsed > 0) {
+    s_current_idx += (int)(elapsed / 3600);
+    s_current_min  = (int)((elapsed % 3600) / 60);
+  }
   snprintf(s_location, sizeof(s_location), "%s", meta.location);
   int initial_offset = s_current_idx - 36;
   s_scroll_offset = (initial_offset > 0) ? initial_offset : 0;
