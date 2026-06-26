@@ -1,5 +1,5 @@
 {
-  "name": "pebble-saa-weather-graph",
+  "name": "pebble-sae-weather-graph",
   "author": "Tuukka Ruhanen",
   "version": "1.3.2",
   "keywords": [
@@ -11,7 +11,7 @@
     "pebble-clay": "*"
   },
   "pebble": {
-    "displayName": "Sää Weather Graph",
+    "displayName": "Sae Weather Graph",
     "uuid": "f315c701-6b02-4cd9-9317-f01924d73106",
     "sdkVersion": "3",
     "enableMultiJS": true,
