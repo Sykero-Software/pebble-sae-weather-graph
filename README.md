@@ -1,4 +1,4 @@
-# Sää Weather Graph
+# Sae Weather Graph
 
 Pebble watch app for viewing weather forecasts as a scrollable graph.
 
