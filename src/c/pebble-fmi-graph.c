@@ -947,7 +947,7 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
 
         if (iy + icon_r <= gb && cx - icon_r > last_icon_right) {
           GColor ind_color = (run_type == 2)
-            ? PBL_IF_COLOR_ELSE(GColorOrange,          GColorWhite)
+            ? PBL_IF_COLOR_ELSE(GColorOrange,             GColorWhite)
             : PBL_IF_COLOR_ELSE(GColorVividCerulean,   GColorWhite);
           graphics_context_set_stroke_color(ctx, ind_color);
 
@@ -968,9 +968,11 @@ static void prv_graph_update(Layer *layer, GContext *ctx) {
             graphics_draw_line(ctx, GPoint(cx + a - 1, iy - a + 1), GPoint(cx - a + 1, iy + a - 1));
           } else if (run_type == 2) {
             /* Lightning bolt: Z-shaped zigzag */
+            graphics_context_set_stroke_width(ctx, 2);
             graphics_draw_line(ctx, GPoint(cx + 1, iy - 4), GPoint(cx - 2, iy));
             graphics_draw_line(ctx, GPoint(cx - 2, iy),     GPoint(cx + 2, iy));
             graphics_draw_line(ctx, GPoint(cx + 2, iy),     GPoint(cx - 1, iy + 4));
+            graphics_context_set_stroke_width(ctx, 1);
           }
 
           last_icon_right = cx + icon_r;
@@ -1984,7 +1986,7 @@ static void prv_window_unload(Window *window) {
 
 static void prv_init(void) {
   prv_load_settings();
-  
+
   /* Apply startup view setting */
   if (s_settings.startup_view == 0) {
     s_zoom_days = 1;
@@ -1995,7 +1997,7 @@ static void prv_init(void) {
   }
   /* Keep initial render window in sync with selected startup zoom. */
   s_view_count = s_zoom_days * 24;
-  
+
   app_message_register_inbox_received(prv_inbox_received);
   app_message_register_inbox_dropped(prv_inbox_dropped);
   app_message_open(app_message_inbox_size_maximum(),

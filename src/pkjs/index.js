@@ -264,8 +264,8 @@ function elToSunCond(el) {
   return 0;
 }
 
-/* Maps WMO weather code to indicator byte: 0=none, 1=snow/sleet, 2=lightning */
-function weatherCodeToIndicator(code) {
+/* Open-Meteo weather_code (WMO) -> indicator: 0=none, 1=snow/sleet, 2=lightning */
+function weatherCodeToIndicatorOpenMeteo(code) {
   if (code === null || code === undefined || isNaN(code)) return 0;
   code = Math.round(code);
   if (code >= 95) return 2;  /* thunderstorm — lightning takes priority */
@@ -273,6 +273,19 @@ function weatherCodeToIndicator(code) {
       (code >= 66 && code <= 67) ||  /* freezing rain */
       (code >= 70 && code <= 79) ||  /* snow */
       (code >= 85 && code <= 86))    /* snow showers */
+    return 1;
+  return 0;
+}
+
+/* FMI WeatherSymbol3 -> indicator: 0=none, 1=snow/sleet, 2=lightning */
+function weatherSymbol3ToIndicatorFmi(code) {
+  if (code === null || code === undefined || isNaN(code)) return 0;
+  code = Math.round(code);
+  if (code >= 61 && code <= 64) return 2;  /* thunder / thunder showers */
+  if ((code >= 41 && code <= 43) ||  /* snow showers */
+      (code >= 51 && code <= 53) ||  /* snow */
+      (code >= 71 && code <= 73) ||  /* sleet showers */
+      (code >= 81 && code <= 83))    /* sleet */
     return 1;
   return 0;
 }
@@ -606,7 +619,7 @@ function parseAndSendOpenMeteo(json, startTime, fallbackName, presetIndex) {
     var p = (precipRaw[idx] !== null && !isNaN(precipRaw[idx])) ? precipRaw[idx] : 0;
     precipByteArray.push(Math.min(255, Math.ceil(Math.max(0, p) * 10)));
 
-    wcodeByteArray.push(weatherCodeToIndicator(wcodeRaw ? wcodeRaw[idx] : null));
+    wcodeByteArray.push(weatherCodeToIndicatorOpenMeteo(wcodeRaw ? wcodeRaw[idx] : null));
 
     var s = wspdRaw[idx];
     wspdByteArray.push((s === null || isNaN(s)) ? 255 : Math.min(254, Math.round(s)));
@@ -779,7 +792,7 @@ function parseAndSend(xml, startTime, lat, lon, fallbackName, presetIndex) {
   // Weather indicator: 0=none, 1=snow/sleet, 2=lightning
   var weatherIndArray = [];
   for (var i = 0; i < temperatures.length; i++) {
-    weatherIndArray.push(weatherCodeToIndicator(i < wcodeRaw.length ? wcodeRaw[i] : null));
+    weatherIndArray.push(weatherSymbol3ToIndicatorFmi(i < wcodeRaw.length ? wcodeRaw[i] : null));
   }
 
   // Sun condition: 0=normal, 1=golden, 2=dark; 100+min=sunrise golden, 160+min=sunset golden
