@@ -207,7 +207,18 @@ module.exports = [
   },
   {
     "type": "heading",
-    "defaultValue": "Data caching"
+    "defaultValue": "Other"
+  },
+  {
+    "type": "select",
+    "messageKey": "STARTUP_VIEW",
+    "defaultValue": 1,
+    "label": "Starting view",
+    "options": [
+      { "label": "1-day view", "value": 0 },
+      { "label": "5-day view", "value": 1 },
+      { "label": "Last viewed", "value": 2 }
+    ]
   },
   {
     "type": "input",

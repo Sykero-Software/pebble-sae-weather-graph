@@ -36,9 +36,11 @@ typedef struct {
   int time_format;       /* 0=24h, 1=12h */
   int date_format;       /* 0=DD.MM., 1=MM/DD */
   float cache_max_age_hours; /* hours before cached forecast is stale */
+  int startup_view;      /* 0=1-day, 1=5-day, 2=last_viewed */
 } AppSettings;
 
-#define SETTINGS_VERSION 6
+#define SETTINGS_VERSION 7
+#define LAST_VIEW_KEY 90  /* persist last zoom state (outside cache key range) */
 
 static AppSettings s_settings = {
   .version = SETTINGS_VERSION,
@@ -54,13 +56,25 @@ static AppSettings s_settings = {
   .show_darkness_z1 = 0, .show_darkness_z5 = 0,
   .time_format = 0, .date_format = 0,
   .cache_max_age_hours = 24.0f,
+  .startup_view = 1,  /* default to 5-day */
 };
 
+static void prv_save_settings(void);  /* forward declaration */
+
 static void prv_load_settings(void) {
-  AppSettings loaded = {0};
-  if (persist_read_data(SETTINGS_KEY, &loaded, sizeof(loaded)) > 0 &&
-      loaded.version == SETTINGS_VERSION) {
+  int stored_size = persist_get_size(SETTINGS_KEY);
+  if (stored_size <= 0) return;
+
+  AppSettings loaded = s_settings;  /* keep defaults for fields missing from older versions */
+  int read_size = stored_size < (int)sizeof(loaded) ? stored_size : (int)sizeof(loaded);
+  if (persist_read_data(SETTINGS_KEY, &loaded, read_size) != read_size) return;
+
+  if (loaded.version == SETTINGS_VERSION) {
     s_settings = loaded;
+  } else if (loaded.version > 0 && loaded.version < SETTINGS_VERSION) {
+    loaded.version = SETTINGS_VERSION;
+    s_settings = loaded;
+    prv_save_settings();
   }
 }
 
@@ -134,6 +148,22 @@ static int s_day_abs_end[MAX_DAYS];
 
 /* Compute per-calendar-day min/max from fixed midnight-aligned grid. Called once after data loads.
    Min = coldest in night (hours 0-7), Max = warmest in daytime (hours 8-19). Independent. */
+/* ---------- persistent state helpers ---------- */
+
+static void prv_save_last_view(void) {
+  persist_write_int(LAST_VIEW_KEY, s_zoom_days);
+}
+
+static int prv_load_last_view(void) {
+  if (persist_exists(LAST_VIEW_KEY)) {
+    int v = persist_read_int(LAST_VIEW_KEY);
+    return (v == 1 || v == 5) ? v : 5;
+  }
+  return 5;  /* default to 5-day if not set */
+}
+
+/* ---------- data processing ---------- */
+
 static void prv_compute_daily_stats(void) {
   s_day_count = 0;
   if (s_temp_count < 2) return;
@@ -386,6 +416,17 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
       v = (float)cma_t->value->int32;
     }
     if (v >= 0.0f) { s_settings.cache_max_age_hours = v; prv_save_settings(); }
+  }
+
+  /* Startup view */
+  Tuple *sv_t = dict_find(iter, MESSAGE_KEY_STARTUP_VIEW);
+  if (sv_t) {
+    int new_view = (sv_t->type == TUPLE_CSTRING)
+      ? atoi(sv_t->value->cstring) : (int)sv_t->value->int32;
+    if (new_view >= 0 && new_view <= 2) {
+      s_settings.startup_view = new_view;
+      prv_save_settings();
+    }
   }
 
   /* Preset location names from JS */
@@ -1815,6 +1856,8 @@ static SimpleMenuSection s_loc_menu_section;
 static int              s_loc_menu_count  = 0;
 static int              s_loc_menu_indices[MAX_MENU_ROWS]; /* maps row → preset idx (0=GPS) */
 
+
+
 static void prv_loc_menu_select(int index, void *ctx) {
   s_selected_preset = s_loc_menu_indices[index];
   window_stack_pop(true);
@@ -1941,6 +1984,18 @@ static void prv_window_unload(Window *window) {
 
 static void prv_init(void) {
   prv_load_settings();
+  
+  /* Apply startup view setting */
+  if (s_settings.startup_view == 0) {
+    s_zoom_days = 1;
+  } else if (s_settings.startup_view == 1) {
+    s_zoom_days = 5;
+  } else if (s_settings.startup_view == 2) {
+    s_zoom_days = prv_load_last_view();
+  }
+  /* Keep initial render window in sync with selected startup zoom. */
+  s_view_count = s_zoom_days * 24;
+  
   app_message_register_inbox_received(prv_inbox_received);
   app_message_register_inbox_dropped(prv_inbox_dropped);
   app_message_open(app_message_inbox_size_maximum(),
@@ -1965,6 +2020,7 @@ static void prv_init(void) {
 }
 
 static void prv_deinit(void) {
+  prv_save_last_view();
   window_destroy(s_window);
 }
 
