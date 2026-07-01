@@ -169,6 +169,7 @@ static int prv_load_last_view(void) {
 
 static int       s_idle_timeout_sec = 15;   /* 0 = off */
 static AppTimer *s_idle_timer       = NULL;
+static bool      s_config_open      = false; /* true while the phone config page is open (pauses idle) */
 
 static void idle_cancel(void) {
   if (s_idle_timer) { app_timer_cancel(s_idle_timer); s_idle_timer = NULL; }
@@ -182,6 +183,7 @@ static void idle_fire(void *ctx) {
 }
 
 static void idle_reset(void) {  /* arm or reschedule */
+  if (s_config_open) return;    /* never (re)arm while the phone config page is open */
   if (s_idle_timeout_sec <= 0) { idle_cancel(); return; }
   if (s_idle_timer) app_timer_reschedule(s_idle_timer, s_idle_timeout_sec * 1000);
   else              s_idle_timer = app_timer_register(s_idle_timeout_sec * 1000, idle_fire, NULL);
@@ -478,6 +480,16 @@ static void prv_inbox_received(DictionaryIterator *iter, void *ctx) {
     s_idle_timeout_sec = idle_sec;
     persist_write_int(IDLE_EXIT_KEY, idle_sec);
     idle_reset();  /* apply new timeout immediately (or cancel if 0) */
+  }
+
+  /* Pause the idle auto-exit while the phone config page is open (no watch buttons
+     are pressed during config, so the idle timer would otherwise fire and kill the
+     app -- and PKJS with it -- closing the config page and losing unsaved changes). */
+  Tuple *co = dict_find(iter, MESSAGE_KEY_CFG_OPEN);
+  if (co) {
+    s_config_open = (co->value->int32 != 0);
+    if (s_config_open) idle_cancel();   /* pause while phone config is open */
+    else               idle_reset();    /* resume when config closes */
   }
 
   /* Preset location names from JS */
